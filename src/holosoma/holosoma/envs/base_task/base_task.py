@@ -210,6 +210,12 @@ class BaseTask:
         self._pending_episode_lengths = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
         self._pending_episode_update_mask = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
         self._pending_torque_rfi: tuple[bool, float] = (False, 0.0)
+        # Action-delay randomization defaults to off; the randomization term flips
+        # this during setup when enabled. Without the default, any code path that
+        # skips randomization (e.g. the SafeFall benchmark, which disables domain
+        # randomization) raises AttributeError from the joint_control term's reset().
+        self._randomize_ctrl_delay: bool = False
+        self._ctrl_delay_step_range: list[int] = [0, 0]
 
     def _refresh_sim_tensors(self):
         self.simulator.refresh_sim_tensors()
