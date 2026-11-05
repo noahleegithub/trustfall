@@ -59,6 +59,34 @@ from loguru import logger
 MECHANISMS = ("push", "slip", "trip", "freeze")
 BASELINES = ("nominal", "default", "damping")
 
+# Perturbation profiles. ``paper`` is the range quoted in the SafeFall write-up;
+# ``calibrated`` was raised after measuring a 27% fall rate on the G1 at ``paper``
+# strength (push |dv|>3.0 m/s fell 85% of the time, slip mu<0.08 only 23%, trip
+# >300 N only 38%), i.e. the paper ranges barely disturb this policy. Deviating
+# from ``paper`` changes the experiment definition, so the active profile is
+# recorded in the run manifest -- quote it alongside results.
+PERTURBATION_PRESETS: dict[str, dict[str, float]] = {
+    "paper": {
+        "push_min": 1.5, "push_max": 3.5,
+        "slip_min": 0.02, "slip_max": 0.15,
+        "slip_duration_min": 0.10, "slip_duration_max": 0.30,
+        "trip_force_min": 150.0, "trip_force_max": 400.0, "trip_duration": 0.05,
+        "freeze_motor_off_p": 0.5, "freeze_two_joint_p": 0.3,
+    },
+    "calibrated": {
+        # push: top of the paper range already fell ~85%; shift the whole band up.
+        "push_min": 2.5, "push_max": 4.5,
+        # slip: longer and slipper -- short, mild slips were the weakest mechanism.
+        "slip_min": 0.01, "slip_max": 0.08,
+        "slip_duration_min": 0.20, "slip_duration_max": 0.50,
+        # trip: ~1.8x the force over twice the window.
+        "trip_force_min": 400.0, "trip_force_max": 800.0, "trip_duration": 0.10,
+        # freeze: motor-off failed ~3x more often than brake-lock; bias toward it
+        # and toward disabling two joints.
+        "freeze_motor_off_p": 0.8, "freeze_two_joint_p": 0.55,
+    },
+}
+
 METRIC_FIELDS = (
     "max_joint_torque",
     "max_torque_ratio",
@@ -331,7 +359,9 @@ class FallBenchmark:
             scenario.trip_force = float(rng.uniform(args.trip_force_min, args.trip_force_max))
             scenario.trip_steps = max(1, round(args.trip_duration * self.control_hz))
         if "freeze" in mechanisms:
-            scenario.freeze_mode = str(rng.choice(["motor_off", "brake_lock"]))
+            scenario.freeze_mode = str(
+                rng.choice(["motor_off", "brake_lock"], p=[args.freeze_motor_off_p, 1.0 - args.freeze_motor_off_p])
+            )
             leg_idx = [
                 i for i, n in enumerate(self.sim.dof_names) if any(k in n.lower() for k in ("hip", "knee", "ankle"))
             ]
@@ -340,7 +370,8 @@ class FallBenchmark:
                 for i, n in enumerate(self.sim.dof_names)
                 if any(k in n.lower() for k in ("shoulder", "elbow", "wrist"))
             ]
-            n_joints = int(rng.choice([1, 2], p=[0.7, 0.3]))
+            p2 = float(args.freeze_two_joint_p)
+            n_joints = int(rng.choice([1, 2], p=[1.0 - p2, p2]))
             pool = leg_idx if (not arm_idx or rng.random() < 0.9) else arm_idx
             scenario.freeze_dofs = sorted(rng.choice(pool, size=min(n_joints, len(pool)), replace=False).tolist())
         return scenario
@@ -1002,15 +1033,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--post-steps", type=int, default=40, help="Post-trigger window (40 = 0.8 s at 50 Hz)")
     p.add_argument("--oracle-lead-steps", type=int, default=15, help="Oracle trigger lead (15 = 300 ms at 50 Hz)")
 
-    p.add_argument("--push-min", type=float, default=1.5)
-    p.add_argument("--push-max", type=float, default=3.5)
-    p.add_argument("--slip-min", type=float, default=0.02)
-    p.add_argument("--slip-max", type=float, default=0.15)
-    p.add_argument("--slip-duration-min", type=float, default=0.10)
-    p.add_argument("--slip-duration-max", type=float, default=0.30)
-    p.add_argument("--trip-force-min", type=float, default=150.0)
-    p.add_argument("--trip-force-max", type=float, default=400.0)
-    p.add_argument("--trip-duration", type=float, default=0.05)
+    # Perturbation magnitudes come from --preset; override individually to deviate.
+    p.add_argument("--preset", choices=tuple(PERTURBATION_PRESETS), default="calibrated",
+                   help="Perturbation strength profile. 'paper' is the range in the write-up; "
+                        "'calibrated' (default) raises it to actually induce falls on the G1.")
+    p.add_argument("--push-min", type=float, default=None)
+    p.add_argument("--push-max", type=float, default=None)
+    p.add_argument("--slip-min", type=float, default=None)
+    p.add_argument("--slip-max", type=float, default=None)
+    p.add_argument("--slip-duration-min", type=float, default=None)
+    p.add_argument("--slip-duration-max", type=float, default=None)
+    p.add_argument("--trip-force-min", type=float, default=None)
+    p.add_argument("--trip-force-max", type=float, default=None)
+    p.add_argument("--trip-duration", type=float, default=None)
+    p.add_argument("--freeze-motor-off-p", type=float, default=None,
+                   help="Probability a freeze scenario is motor-off rather than brake-lock.")
+    p.add_argument("--freeze-two-joint-p", type=float, default=None,
+                   help="Probability a freeze scenario disables two joints rather than one.")
     p.add_argument("--brake-kp", type=float, default=100.0)
     p.add_argument("--brake-kd", type=float, default=10.0)
 
@@ -1020,7 +1059,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--render-dir", default=None, help="Video output dir (default: <output-dir>/videos)")
     p.add_argument("--render-playback-rate", type=float, default=0.25)
 
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+    # Fill anything the caller did not set explicitly from the selected profile.
+    for key, value in PERTURBATION_PRESETS[args.preset].items():
+        if getattr(args, key, None) is None:
+            setattr(args, key, value)
+    return args
 
 
 def main(argv: list[str] | None = None) -> None:

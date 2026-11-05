@@ -140,8 +140,13 @@ if [[ ! -f $SENTINEL_FILE ]]; then
   echo "Installing MuJoCo Python bindings..."
   pip install --upgrade pip
 
-  # Core MuJoCo packages
-  pip install 'mujoco>=3.0.0'
+  # Core MuJoCo packages.
+  # PINNED: mujoco_warp@${MUJOCO_WARP_COMMIT} uses MjModel.nflexevpair, which
+  # MuJoCo 3.17.0 removed. An unpinned '>=3.0.0' floated to 3.17.0 on rebuild and
+  # broke WarpBackend at put_model() with AttributeError -- an image that built
+  # and imported fine but could not construct an environment. 3.14.0 is the last
+  # version verified against this commit; bump both together or not at all.
+  pip install 'mujoco==3.14.0'
   pip install mujoco-python-viewer
   # Optional: Gymnasium MuJoCo environments (if needed for compatibility)
  # pip install "gymnasium[mujoco]"
@@ -281,6 +286,28 @@ if [[ "$INSTALL_WARP" == "true" ]] && [[ ! -f $WARP_SENTINEL_FILE ]]; then
   fi
   pip install uv
   uv pip install -e $WORKSPACE_DIR/mujoco_warp[dev,cuda]
+
+  # mujoco_warp's own metadata allows warp-lang>=1.14, so an unpinned install
+  # floated 1.17.0 -> 1.18.0 on rebuild. Hold it at the version this commit was
+  # validated with.
+  pip install 'warp-lang==1.17.0'
+
+  # Fail the BUILD (not a GPU job) if the mujoco/mujoco_warp pair is incompatible.
+  python - <<'PYCHECK'
+import sys
+import mujoco
+
+model = mujoco.MjModel.from_xml_string(
+    '<mujoco><worldbody><body><geom size="0.1"/></body></worldbody></mujoco>'
+)
+if not hasattr(model, "nflexevpair"):
+    sys.exit(
+        f"FATAL: mujoco {mujoco.__version__} has no MjModel.nflexevpair, which "
+        f"mujoco_warp requires. Pin mujoco to a compatible version."
+    )
+import warp
+print(f"compat OK: mujoco={mujoco.__version__} warp={warp.__version__}")
+PYCHECK
 
   touch $WARP_SENTINEL_FILE
 

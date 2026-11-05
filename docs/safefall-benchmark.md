@@ -31,6 +31,28 @@ physics substep:
 
 `cfrc_int` and `cfrc_ext` are `[torque(3), force(3)]`; the code uses the force half.
 
+## Perturbation presets
+
+`--preset` selects the perturbation strength. The active preset is recorded in
+`manifest.json`; quote it with any result.
+
+| parameter | `paper` | `calibrated` (default) |
+|---|---|---|
+| push `|dv|` | 1.5–3.5 m/s | 2.5–4.5 m/s |
+| slip friction | 0.02–0.15 | 0.01–0.08 |
+| slip duration | 0.10–0.30 s | 0.20–0.50 s |
+| trip force | 150–400 N | 400–800 N |
+| trip duration | 0.05 s | 0.10 s |
+| freeze motor-off probability | 0.5 | 0.8 |
+| freeze two-joint probability | 0.30 | 0.55 |
+
+Measured on the G1 with the `paper` ranges, only 27% of scenarios produced a fall,
+and the weakest mechanisms were slip (16%) and trip (18%); push above 3.0 m/s fell
+85% of the time and `motor_off` froze fell ~3x more often than `brake_lock`. The
+`calibrated` preset shifts each mechanism toward the regime that actually topples
+this policy. **This is a deviation from the paper's protocol** — use `--preset paper`
+when the number must match the write-up, and say which was used either way.
+
 ## Fall scenarios
 
 A trial is: walk 1-2 s with the nominal policy, then apply 1-3 of:
