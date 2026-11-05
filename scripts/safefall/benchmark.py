@@ -437,7 +437,10 @@ class FallBenchmark:
             normal = self.sim.contact_forces[:, foot_holo, 2]
             swing_local = normal[idx].argmin(dim=1)
             body = foot_raw[swing_local]
-            vel = self.sim._rigid_body_vel[idx][:, foot_holo[swing_local], :2]
+            # Paired advanced indexing: gather (env, its swing foot) in one step.
+            # Chaining [idx][:, foot_ids] would instead produce an (n, n, 2)
+            # cross-product of every env against every foot.
+            vel = self.sim._rigid_body_vel[idx, foot_holo[swing_local], :2]
             speed = torch.linalg.vector_norm(vel, dim=-1, keepdim=True)
             direction = -vel / speed.clamp_min(1e-6)
             random_dir = torch.nn.functional.normalize(torch.randn(len(idx), 2, device=self.device), dim=-1)
