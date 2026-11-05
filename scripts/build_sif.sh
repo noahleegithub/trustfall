@@ -22,7 +22,13 @@
 #   CLEAN_SCRATCH, DOCKER_USERNAME, DOCKER_PASSWORD
 set -u
 
-IMAGE_URI="${IMAGE_URI:-docker://ghcr.io/noahleegithub/safefall-mujoco:1.0.0}"
+# Pin an immutable tag. `1.0.0` is a STALE image (manifest 9b47d036...); the
+# current build is sha-044bcb8 == 2026_1031_2111 (manifest 27ec954b...).
+# Check before bumping:
+#   T=$(curl -s "https://ghcr.io/token?scope=repository:noahleegithub/safefall-mujoco:pull&service=ghcr.io" | jq -r .token)
+#   curl -sI -H "Authorization: Bearer $T" -H 'Accept: application/vnd.oci.image.index.v1+json' \
+#     https://ghcr.io/v2/noahleegithub/safefall-mujoco/manifests/<tag> | grep -i docker-content-digest
+IMAGE_URI="${IMAGE_URI:-docker://ghcr.io/noahleegithub/safefall-mujoco:sha-044bcb8}"
 SIF="${SIF:-${SCRATCH:-/scratch}/images/safefall-mujoco.sif}"
 FORCE="${FORCE:-0}"
 VERIFY="${VERIFY:-1}"
