@@ -25,7 +25,8 @@ physics substep:
 | `max_contact_force` | per-contact solver force | peak per-link **ground** contact force (non-robot body only) |
 | `max_impulse` | per-contact force | max per-physics-step ground reaction impulse, `|ΣF| dt` |
 | `cumulative_impulse` | per-contact force | sum of per-step impulses over the trial window |
-| `illegal_contact` | per-contact body pair | 1 if a protected link (head / hand) contacted ground or a non-adjacent link |
+| `illegal_contact` | per-contact body pair | 1 if a protected link (head / hand — `wrist` on a handless humanoid) contacted ground or a non-adjacent link |
+| `torso_contact` | per-contact body pair | 1 if the torso struck the ground. Reported separately: every fall lands on the torso, so folding it into `illegal_contact` saturates that metric at 100% |
 | `max_limit_violations` | `qpos` vs hard limits | max number of joints outside position limits at one substep |
 
 `cfrc_int` and `cfrc_ext` are `[torque(3), force(3)]`; the code uses the force half.
@@ -86,6 +87,17 @@ videos/trial_<id>_<baseline>.mp4
 
 `TRIALS` is the total across shards; each shard takes `trial_id % shards == shard`.
 `SHARDS` must match the Slurm array size.
+
+**`NUM_ENVS` is part of the reported configuration.** Fall dynamics are chaotic, so a
+trial is not numerically reproducible across `NUM_ENVS` even though its scenario spec
+and spawn state are keyed to `trial_id`. Reported numbers use **`NUM_ENVS=64`**, and
+`NUM_ENVS` is recorded in each run's `manifest.json` — quote it with any result.
+Smaller batches are valid for smoke tests and calibration only.
+
+`--protected-patterns` defaults to `head,hand,wrist`. The benchmark aborts at startup
+if no body matches, because an empty mask would silently report `illegal_contact = 0`
+for every trial (that is exactly what happened before the pattern was made
+robot-aware: the G1 model has no `head` or `hand` body).
 
 ## Important caveats
 

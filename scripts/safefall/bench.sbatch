@@ -33,7 +33,10 @@ set -euo pipefail
 CHECKPOINT="${CHECKPOINT:-}"
 TRIALS="${TRIALS:-200}"
 SHARDS="${SHARDS:-8}"
-NUM_ENVS="${NUM_ENVS:-256}"
+# NUM_ENVS is part of the reported configuration, not a performance knob: fall
+# dynamics are chaotic, so per-trial results are NOT comparable across batch sizes.
+# Reported runs use 64; small batches are for smoke/calibration only.
+NUM_ENVS="${NUM_ENVS:-64}"
 SEED="${SEED:-0}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
 REPO="${REPO:-$SCRATCH/safefall}"

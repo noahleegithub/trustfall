@@ -56,6 +56,7 @@ class ImpactTrialMetrics:
     max_impulse: torch.Tensor
     cumulative_impulse: torch.Tensor
     illegal_contact: torch.Tensor
+    torso_contact: torch.Tensor
     max_limit_violations: torch.Tensor
 
 
@@ -85,6 +86,7 @@ class ImpactMonitor:
         window_steps: int = 48,
         protected_patterns: Sequence[str] = ("head", "hand"),
         foot_patterns: Sequence[str] = ("foot", "ankle"),
+        severe_patterns: Sequence[str] = ("torso",),
     ) -> None:
         if window_steps < 1:
             raise ValueError(f"window_steps must be >= 1, got {window_steps}")
@@ -106,6 +108,10 @@ class ImpactMonitor:
         lower_names = [str(n).lower() for n in simulator.body_names]
         self.foot_mask = self._body_mask(lower_names, foot_patterns)
         self.protected_mask = self._body_mask(lower_names, protected_patterns)
+        # Torso contact is reported separately from illegal (head/hand) contact: on a
+        # headless humanoid every fall ends on the torso, so folding it into
+        # illegal_contact would saturate that metric at 100% and destroy its ranking.
+        self.severe_mask = self._body_mask(lower_names, severe_patterns)
 
         # Raw body ids (0 == world).  ``body_parentid`` is static.
         parent = np.asarray(simulator.root_model.body_parentid, dtype=np.int64)
@@ -138,6 +144,7 @@ class ImpactMonitor:
             "impulse": torch.zeros(k, n, device=self.device),
             "limit_violations": torch.zeros(k, n, device=self.device),
             "illegal": torch.zeros(k, n, device=self.device),
+            "severe": torch.zeros(k, n, device=self.device),
         }
         self._step = {key: torch.zeros(n, device=self.device) for key in self._ring}
         self.first_contact_step = torch.full((n,), -1, dtype=torch.long, device=self.device)
@@ -227,6 +234,7 @@ class ImpactMonitor:
             ground_force = torch.zeros(n, self.nbody, 3, device=self.device)
             nonfoot_contact = torch.zeros(n, dtype=torch.bool, device=self.device)
             illegal_contact = torch.zeros(n, dtype=torch.bool, device=self.device)
+            severe_contact = torch.zeros(n, dtype=torch.bool, device=self.device)
         else:
             body1 = body1.to(device=self.device, dtype=torch.long)
             body2 = body2.to(device=self.device, dtype=torch.long)
@@ -266,6 +274,11 @@ class ImpactMonitor:
             illegal = valid & protected & (external | (robot_self & ~adjacent))
             illegal_contact = _scatter_any(illegal, worldid, n)
 
+            # Severe-but-not-illegal: torso striking the ground. Reported separately
+            # because on a headless humanoid it fires on essentially every fall.
+            severe = valid & external & (self.severe_mask[body1] | self.severe_mask[body2])
+            severe_contact = _scatter_any(severe, worldid, n)
+
         # Per-link ground force (raw peak; the reward's [F - mg]+ form is built later).
         link_force = torch.linalg.vector_norm(ground_force[:, self.robot_body_ids, :], dim=-1)
         self._step["contact_force"] = torch.maximum(self._step["contact_force"], link_force.max(dim=1).values)
@@ -276,6 +289,10 @@ class ImpactMonitor:
 
         self._step["illegal"] = torch.maximum(
             self._step["illegal"], illegal_contact.to(dtype=self._step["illegal"].dtype)
+        )
+
+        self._step["severe"] = torch.maximum(
+            self._step["severe"], severe_contact.to(dtype=self._step["severe"].dtype)
         )
 
         # ---- joint limit violations
@@ -311,6 +328,7 @@ class ImpactMonitor:
                 max_impulse=empty.clone(),
                 cumulative_impulse=empty.clone(),
                 illegal_contact=empty.clone(),
+                torso_contact=empty.clone(),
                 max_limit_violations=empty.clone(),
             )
         env_ids = env_ids.to(device=self.device, dtype=torch.long)
@@ -337,6 +355,7 @@ class ImpactMonitor:
         max_impulse = impulse.max(dim=1).values
         cumulative = impulse.sum(dim=1)
         illegal = gather("illegal").max(dim=1).values > 0.5
+        torso = gather("severe").max(dim=1).values > 0.5
         limits = gather("limit_violations").max(dim=1).values
 
         return ImpactTrialMetrics(
@@ -347,6 +366,7 @@ class ImpactMonitor:
             max_impulse=max_impulse,
             cumulative_impulse=cumulative,
             illegal_contact=illegal,
+            torso_contact=torso,
             max_limit_violations=limits,
         )
 

@@ -67,6 +67,7 @@ METRIC_FIELDS = (
     "max_impulse",
     "cumulative_impulse",
     "illegal_contact",
+    "torso_contact",
     "max_limit_violations",
 )
 
@@ -241,8 +242,17 @@ class FallBenchmark:
         self.base_friction = self.sim.get_geom_friction(
             self.friction_geom_ids, torch.arange(self.num_envs, device=self.device)
         )
-        self.monitor = ImpactMonitor(self.env, self.sim, window_steps=window)
+        patterns = tuple(p.strip().lower() for p in self.args.protected_patterns.split(",") if p.strip())
+        self.monitor = ImpactMonitor(self.env, self.sim, window_steps=window, protected_patterns=patterns)
         self.monitor.reset()
+        n_protected = int(self.monitor.protected_mask.sum())
+        if n_protected == 0:
+            raise RuntimeError(
+                "No bodies matched --protected-patterns "
+                f"({', '.join(patterns)}); illegal_contact would be identically zero. "
+                f"Available bodies: {', '.join(str(n) for n in self.sim.body_names)}"
+            )
+        logger.info(f"Protected bodies for illegal_contact ({n_protected}): {', '.join(patterns)}")
 
     def _install_freeze_override(self) -> None:
         self.freeze_mode = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
@@ -337,7 +347,20 @@ class FallBenchmark:
 
     # ------------------------------------------------------------------ rollout
 
-    def _reset(self, commands: torch.Tensor) -> dict:
+    def _trial_origin(self, trial_ids: list[int]) -> torch.Tensor:
+        """Deterministic spawn position for a trial, independent of batch size/slot.
+
+        The env slot otherwise decides the spawn position (terrain origins, plus an
+        optional random XY offset), which makes a trial's outcome depend on how many
+        environments happened to be batched with it.
+        """
+        out = torch.zeros(len(trial_ids), 2, device=self.device)
+        for i, tid in enumerate(trial_ids):
+            out[i, 0] = float((int(tid) % 64) * 4.0)
+            out[i, 1] = float((int(tid) // 64) * 4.0)
+        return out
+
+    def _reset(self, commands: torch.Tensor, trial_ids: list[int]) -> dict:
         # Start every batch from a clean model/controller state.
         self.freeze_mode.zero_()
         self.freeze_mask.zero_()
@@ -350,6 +373,25 @@ class FallBenchmark:
         term._kd_scale[:] = 1.0
 
         self.env.reset_all()
+        # Replace the slot-dependent spawn state with a trial-keyed one. The default
+        # reset puts each env at its own terrain origin and may draw a random XY
+        # offset from the global RNG; either makes results depend on batch composition.
+        k = int(commands.shape[0])
+        ids = torch.arange(k, device=self.device, dtype=torch.long)
+        base = self.env.base_init_state.to(self.device)
+        root = base.unsqueeze(0).repeat(k, 1).clone()
+        root[:, 0:2] = self._trial_origin(trial_ids)
+        self.sim.set_actor_root_state_tensor_robots(ids, root)
+        if not getattr(self, "_origin_logged", False):
+            logger.info(
+                f"Trial-keyed spawn: trial {trial_ids[0]} -> x,y="
+                f"({float(root[0, 0]):.1f}, {float(root[0, 1]):.1f}), z={float(root[0, 2]):.3f} "
+                f"(independent of env slot / NUM_ENVS)"
+            )
+            self._origin_logged = True
+        dof = torch.zeros(self.num_envs, self.ndof, 2, device=self.device)
+        dof[:, :, 0] = self.env.default_dof_pos.to(self.device)
+        self.sim.set_dof_state_tensor_robots(ids, dof.reshape(-1, 2))
         self.env.command_manager.commands[: commands.shape[0]] = commands.to(self.device)
         self.env.observation_manager.reset()
         self.env._compute_observations()
@@ -443,7 +485,14 @@ class FallBenchmark:
             vel = self.sim._rigid_body_vel[idx, foot_holo[swing_local], :2]
             speed = torch.linalg.vector_norm(vel, dim=-1, keepdim=True)
             direction = -vel / speed.clamp_min(1e-6)
-            random_dir = torch.nn.functional.normalize(torch.randn(len(idx), 2, device=self.device), dim=-1)
+            # Trial-keyed fallback direction. A raw torch.randn here depends on how
+            # many draws preceded it in the process, i.e. on batch composition.
+            dirs = []
+            for j in trip_local:
+                trng = np.random.default_rng(self.args.seed * 100003 + scenarios[j].trial_id * 7919 + 29)
+                ang = float(trng.uniform(0.0, 2.0 * math.pi))
+                dirs.append((math.cos(ang), math.sin(ang)))
+            random_dir = torch.tensor(dirs, device=self.device, dtype=torch.float32)
             direction = torch.where(speed > 0.1, direction, random_dir)
             mag = torch.tensor([scenarios[j].trip_force for j in trip_local], device=self.device, dtype=torch.float32)
             forces = torch.cat([direction * mag.unsqueeze(1), (0.15 * mag).unsqueeze(1)], dim=1)
@@ -475,7 +524,7 @@ class FallBenchmark:
         k_state = max(32, args.oracle_lead_steps + 4)
 
         commands = torch.tensor([s.command for s in scenarios], device=self.device, dtype=torch.float32)
-        obs = self._reset(commands)
+        obs = self._reset(commands, [s.trial_id for s in scenarios])
 
         t_pert = torch.tensor([s.t_pert for s in scenarios], device=self.device, dtype=torch.long)
         phase = torch.zeros(n, dtype=torch.long, device=self.device)  # 0=pre,1=falling,2=post,3=done,4=recovery
@@ -733,7 +782,7 @@ class FallBenchmark:
         term._kp_scale[:] = 1.0
         term._kd_scale[:] = 1.0
 
-        obs = self._reset(torch.tensor([scenario.command], device=self.device))
+        obs = self._reset(torch.tensor([scenario.command], device=self.device), [scenario.trial_id])
         self.monitor.reset()
 
         out_dir = Path(args.render_dir).expanduser() if args.render_dir else (self.output_dir / "videos")
@@ -935,6 +984,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--num-shards", type=int, default=1)
     p.add_argument("--num-envs", type=int, default=64)
     p.add_argument("--nconmax-per-env", type=int, default=192, help="mjwarp contact capacity per env")
+    p.add_argument(
+        "--protected-patterns",
+        default="head,hand,wrist",
+        help="Comma-separated body-name substrings counted as protected links for "
+        "illegal_contact. Defaults suit a headless humanoid: wrists stand in for hands. "
+        "Torso contact is tracked separately as torso_contact, not counted here, because "
+        "every fall lands on the torso and would saturate illegal_contact. The benchmark "
+        "refuses to run if no body matches.",
+    )
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default=None)
 

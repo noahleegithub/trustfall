@@ -102,8 +102,30 @@ def test_peak_metrics():
     assert torch.allclose(res.max_contact_force, torch.tensor([100.0, 200.0]))
     assert torch.allclose(res.max_impulse, torch.tensor([0.5, 1.0]))
     assert torch.equal(res.illegal_contact, torch.tensor([False, True]))
+    # env 0 hit the ground with the torso, env 1 with the head: severe-but-not-illegal
+    # contact must be reported in its own column and must NOT leak into illegal.
+    assert torch.equal(res.torso_contact, torch.tensor([True, False]))
     assert torch.equal(res.max_limit_violations, torch.tensor([0.0, 0.0]))
     assert torch.equal(monitor.first_contact_step[:2], torch.tensor([1, 1]))
+
+
+def test_torso_contact_is_not_illegal():
+    """Torso ground contact is severe but not illegal; illegal is head/hand only."""
+    monitor, _backend, sim = _make_monitor()
+    _step(monitor, sim, torque=[1.0, 1.0], reaction=[1.0, 1.0], contact=[10.0, 10.0])
+    res = monitor.results(torch.tensor([0, 1]), torch.tensor([1, 1]), torch.tensor([1, 1]))
+    # both envs touched the ground, but only env 1 (head) is an illegal contact
+    assert res.torso_contact.tolist() == [True, False]
+    assert res.illegal_contact.tolist() == [False, True]
+
+
+def test_protected_mask_can_be_emptied():
+    """A pattern set that matches nothing must yield an empty mask, so callers can
+    detect it and refuse to run instead of emitting a column of zeros forever."""
+    monitor, _backend, _sim = _make_monitor()
+    names = ["torso", "head", "foot"]
+    assert int(monitor._body_mask(names, ("head", "hand")).sum()) == 1
+    assert int(monitor._body_mask(names, ("wrist", "hand")).sum()) == 0
 
 
 def test_ring_window_and_reset():

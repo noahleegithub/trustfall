@@ -30,6 +30,7 @@ METRICS = [
     ("max_impulse", "Max step impulse (N·s)", True),
     ("cumulative_impulse", "Cumulative impulse (N·s)", True),
     ("illegal_contact", "Illegal-contact trials (%)", False),
+    ("torso_contact", "Torso-contact trials (%)", False),
     ("max_limit_violations", "Max joint-limit violations", False),
 ]
 BASELINES = ["nominal", "default", "damping"]
@@ -48,6 +49,8 @@ def load_trials(run_dir: Path) -> pd.DataFrame:
             continue
         df[col] = pd.to_numeric(df[col], errors="coerce")
     df["illegal_pct"] = 100.0 * df["illegal_contact"].fillna(0.0)
+    if "torso_contact" in df.columns:
+        df["torso_pct"] = 100.0 * df["torso_contact"].fillna(0.0)
     if "primary" not in df or df["primary"].isna().all():
         df["primary"] = df["mechanisms"].astype(str).str.split("+").str[0]
     return df
