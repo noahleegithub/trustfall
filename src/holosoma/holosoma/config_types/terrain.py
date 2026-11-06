@@ -108,6 +108,24 @@ class SpawnCfg:
 
 
 @dataclass(frozen=True)
+@dataclass
+class ObstacleCfg:
+    """A single welded box obstacle that can be relocated per environment.
+
+    Added to the world by the terrain builder and moved at runtime through
+    ``set_static_body_world_pose`` (body_pos/body_quat are expanded per world before the
+    CUDA graph is captured, so the collision pipeline honours the new pose). Used by the
+    SafeFall benchmark as a real trip hazard instead of a synthetic foot force.
+    """
+
+    name: str = "trip_obstacle"
+    half_extents: tuple[float, float, float] = (0.15, 0.15, 0.05)
+    """Half sizes in metres: 30 x 30 cm footprint, 10 cm tall."""
+    pos: tuple[float, float, float] = (0.0, 0.0, -5.0)
+    """Initial pose. Parked below the ground by default so it is inert until placed."""
+    rgba: tuple[float, float, float, float] = (0.85, 0.25, 0.15, 1.0)
+
+
 class TerrainTermCfg:
     """Configuration for the terrain manager.
 
@@ -166,6 +184,9 @@ class TerrainTermCfg:
 
     num_cols: int = 20
     """Number of terrain columns (terrain types)."""
+
+    obstacle: ObstacleCfg | None = None
+    """Optional welded box obstacle (default None = no obstacle in the scene)."""
 
     spawn: SpawnCfg = field(default_factory=SpawnCfg)
     """Spawn behavior configuration."""

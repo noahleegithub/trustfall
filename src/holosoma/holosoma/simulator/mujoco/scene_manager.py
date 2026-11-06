@@ -223,6 +223,23 @@ class MujocoSceneManager:
             if terrain_state.hide_visual:
                 terrain_state.geom.rgba = [0.0, 0.0, 0.0, 0.0]  # type: ignore[attr-defined]
 
+        # Optional welded box obstacle (e.g. the SafeFall trip hazard). A body with no
+        # joint is welded, so its pose lives in the model's body_pos/body_quat, which are
+        # expanded per world -- that is what lets the benchmark relocate it per env at
+        # runtime via set_static_body_world_pose.
+        obstacle = getattr(terrain_state, "obstacle", None)
+        if obstacle is not None:
+            body = self.world_spec.worldbody.add_body(name=obstacle.name, pos=list(obstacle.pos))
+            body.add_geom(
+                name=f"{obstacle.name}_geom",
+                type=mujoco.mjtGeom.mjGEOM_BOX,
+                size=list(obstacle.half_extents),
+                rgba=list(obstacle.rgba),
+                contype=2,  # environment class: collides with the robot (class 1) only
+                conaffinity=1,
+            )
+            logger.info(f"Added obstacle body '{obstacle.name}' half_extents={obstacle.half_extents}")
+
     def _create_ground_plane(self, terrain_state: TerrainTermBase) -> mujoco.MjSpec.Geom:
         """Create a ground plane terrain geometry.
 
