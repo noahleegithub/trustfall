@@ -113,7 +113,13 @@ class IMujocoBackend(abc.ABC):
     # different force extraction path).
     def get_contact_forces_world(
         self,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, ...]:
+        """``(force, body1, body2, worldid, valid, geom1, geom2)``.
+
+        The geom ids are needed to attribute a contact to a *part* rather than a body:
+        on the G1 the head collision capsule is a geom welded to ``torso_link``, so
+        body-level attribution cannot tell a head strike from a torso strike.
+        """
         """Per-contact world-frame forces and their body/environment membership.
 
         Returns

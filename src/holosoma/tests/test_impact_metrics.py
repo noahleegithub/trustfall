@@ -32,9 +32,11 @@ class _FakeBackend:
         self.valid = torch.zeros(0, dtype=torch.bool)
         self.cfrc_int = torch.zeros(num_envs, nbody, 6)
         self.qfrc_constraint = torch.zeros(num_envs, nv)
+        self.geom1 = torch.zeros(0, dtype=torch.long)
+        self.geom2 = torch.zeros(0, dtype=torch.long)
 
     def get_contact_forces_world(self):
-        return self.contact_force, self.body1, self.body2, self.worldid, self.valid
+        return self.contact_force, self.body1, self.body2, self.worldid, self.valid, self.geom1, self.geom2
 
     def get_internal_wrenches(self):
         return self.cfrc_int
@@ -45,11 +47,14 @@ class _FakeBackend:
 
 def _make_monitor(num_envs: int = 2, nbody: int = 4, nv: int = 7):
     # body 0 world, 1 torso, 2 head, 3 foot.  Robot dof address 6 -> joint 0 -> body 1.
+    # geoms: 0 = ground (world), 1 = torso capsule, 2 = HEAD capsule (welded to the
+    # torso body, exactly like the G1's head_collision), 3 = foot.
     root_model = SimpleNamespace(
         nbody=nbody,
         body_parentid=np.array([0, 0, 1, 1], dtype=np.int32),
         dof_jntid=np.zeros(nv, dtype=np.int32),
         jnt_bodyid=np.array([1], dtype=np.int32),
+        geom_bodyid=np.array([0, 1, 1, 3], dtype=np.int32),
     )
     backend = _FakeBackend(num_envs, nbody, nv)
     sim = SimpleNamespace(
@@ -61,6 +66,7 @@ def _make_monitor(num_envs: int = 2, nbody: int = 4, nv: int = 7):
         sim_dt=0.005,
         body_ids=[1, 2, 3],
         body_names=["torso", "head", "foot"],
+        geom_names=["ground", "torso_collision1", "head_collision", "foot_geom"],
         dof_names=["joint0"],
         dof_qvel_addrs=[6],
         dof_pos=torch.zeros(num_envs, 1),
@@ -88,6 +94,9 @@ def _step(monitor, sim, *, torque, reaction, contact):
     backend.body2 = torch.tensor([0, 0], dtype=torch.long)
     backend.worldid = torch.tensor([0, 1], dtype=torch.long)
     backend.valid = torch.tensor([True, True])
+    # env 0 -> torso capsule (geom 1), env 1 -> head capsule (geom 2, same body as torso)
+    backend.geom1 = torch.tensor([1, 2], dtype=torch.long)
+    backend.geom2 = torch.tensor([0, 0], dtype=torch.long)
     sim.hooks.emit(Phase.POST_STEP)
     sim.hooks.emit(Phase.FRAME_END)
 
@@ -107,6 +116,21 @@ def test_peak_metrics():
     assert torch.equal(res.torso_contact, torch.tensor([True, False]))
     assert torch.equal(res.max_limit_violations, torch.tensor([0.0, 0.0]))
     assert torch.equal(monitor.first_contact_step[:2], torch.tensor([1, 1]))
+
+
+def test_per_part_severity_uses_geoms_not_bodies():
+    """The head capsule shares torso_link's body, so severity must be attributed by
+    geom: env 0 hits the torso, env 1 hits the head, both on body 1's neighbour."""
+    monitor, _backend, sim = _make_monitor()
+    _step(monitor, sim, torque=[1.0, 1.0], reaction=[1.0, 1.0], contact=[100.0, 250.0])
+    res = monitor.results(torch.tensor([0, 1]), torch.tensor([1, 1]), torch.tensor([1, 1]))
+    # env 0: torso strike; env 1: head strike with the larger force
+    assert res.peak_force_torso.tolist() == [100.0, 0.0], res.peak_force_torso
+    assert res.peak_force_head.tolist() == [0.0, 250.0], res.peak_force_head
+    assert res.peak_force_hand.tolist() == [0.0, 0.0]
+    # impulse = force * sim_dt (0.005 s)
+    assert abs(res.cum_impulse_torso[0].item() - 0.5) < 1e-5
+    assert abs(res.cum_impulse_head[1].item() - 1.25) < 1e-5
 
 
 def test_torso_contact_is_not_illegal():

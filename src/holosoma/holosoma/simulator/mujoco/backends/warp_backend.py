@@ -543,7 +543,7 @@ class WarpBackend(IMujocoBackend):
 
     def get_contact_forces_world(
         self,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, ...]:
         """Per-contact world-frame forces, zero-copy from the mjwarp contact solver.
 
         The kernel writes a ``spatial_vector`` per contact; ``contact_force_fn`` fills
@@ -552,8 +552,14 @@ class WarpBackend(IMujocoBackend):
         """
         if self._naconmax == 0:
             empty = torch.zeros(0, device=self.device)
-            return empty.view(0, 3), empty.long(), empty.long(), empty.long(), torch.zeros(
-                0, dtype=torch.bool, device=self.device
+            return (
+                empty.view(0, 3),
+                empty.long(),
+                empty.long(),
+                empty.long(),
+                torch.zeros(0, dtype=torch.bool, device=self.device),
+                empty.long(),
+                empty.long(),
             )
 
         import mujoco_warp as mjw
@@ -567,7 +573,9 @@ class WarpBackend(IMujocoBackend):
         body2 = self.geom_bodyid_t[geom[:, 1]]
         worldid = self.contact_worldid_t
         valid = self._contact_arange_t < self.nacon_t[0]
-        return force, body1, body2, worldid, valid
+        # Geom ids let the impact monitor attribute contacts to parts (head capsule,
+        # torso capsules, hand links) instead of only to bodies.
+        return force, body1, body2, worldid, valid, geom[:, 0], geom[:, 1]
 
     def get_internal_wrenches(self) -> torch.Tensor:
         """Return ``cfrc_int`` [N, nbody, 6] (``[torque, force]`` order)."""

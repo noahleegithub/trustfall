@@ -189,7 +189,7 @@ class ClassicBackend(IMujocoBackend):
 
     def get_contact_forces_world(
         self,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, ...]:
         """Per-contact world-frame forces for the single classic environment.
 
         ``mj_contactForce`` returns ``[force, torque]`` in the contact frame; rotate the
@@ -201,8 +201,10 @@ class ClassicBackend(IMujocoBackend):
         body2 = torch.zeros(ncon, dtype=torch.long, device=self.device)
         worldid = torch.zeros(ncon, dtype=torch.long, device=self.device)
         valid = torch.ones(ncon, dtype=torch.bool, device=self.device)
+        geom1 = torch.zeros(ncon, dtype=torch.long, device=self.device)
+        geom2 = torch.zeros(ncon, dtype=torch.long, device=self.device)
         if ncon == 0:
-            return force, body1, body2, worldid, valid
+            return force, body1, body2, worldid, valid, geom1, geom2
 
         ft = np.zeros(6, dtype=np.float64)
         for i in range(ncon):
@@ -213,7 +215,9 @@ class ClassicBackend(IMujocoBackend):
             force[i] = torch.from_numpy(world_force).float()
             body1[i] = int(self.model.geom_bodyid[contact.geom1])
             body2[i] = int(self.model.geom_bodyid[contact.geom2])
-        return force, body1, body2, worldid, valid
+            geom1[i] = int(contact.geom1)
+            geom2[i] = int(contact.geom2)
+        return force, body1, body2, worldid, valid, geom1, geom2
 
     def get_internal_wrenches(self) -> torch.Tensor:
         """Return ``cfrc_int`` [1, nbody, 6] in ``[torque, force]`` order."""

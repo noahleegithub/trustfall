@@ -453,6 +453,15 @@ class MuJoCo(BaseSimulator):
         self.body_names = list(meta.body_names)
         self.num_bodies = len(self.body_names)
 
+        # Full-model geom names, indexed by MuJoCo geom id. The impact monitor needs
+        # these to attribute a contact to a *part*: on the G1 the head collision
+        # capsule (`head_collision`) is a geom welded to torso_link, so body-level
+        # attribution cannot distinguish a head strike from a torso strike.
+        self.geom_names = [
+            mujoco.mj_id2name(self.root_model, mujoco.mjtObj.mjOBJ_GEOM, g) or f"geom_{g}"
+            for g in range(int(self.root_model.ngeom))
+        ]
+
         # Map each robot body (by prefixed name) to its compiled MuJoCo body id,
         # in body_names order. This is the cross-backend ``body_ids`` mapping
         # (body_ids[holosoma_idx] -> backend body id; mirrors IsaacGym/IsaacSim) used to

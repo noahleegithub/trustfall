@@ -31,6 +31,12 @@ METRICS = [
     ("cumulative_impulse", "Cumulative impulse (N·s)", True),
     ("illegal_contact", "Illegal-contact trials (%)", False),
     ("torso_contact", "Torso-contact trials (%)", False),
+    ("peak_force_head", "Peak HEAD force (N)", True),
+    ("peak_force_torso", "Peak torso force (N)", True),
+    ("peak_force_hand", "Peak hand force (N)", True),
+    ("cum_impulse_head", "Head impulse (N·s)", True),
+    ("cum_impulse_torso", "Torso impulse (N·s)", True),
+    ("cum_impulse_hand", "Hand impulse (N·s)", True),
     ("max_limit_violations", "Max joint-limit violations", False),
 ]
 BASELINES = ["nominal", "default", "damping"]

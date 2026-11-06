@@ -96,6 +96,13 @@ METRIC_FIELDS = (
     "cumulative_impulse",
     "illegal_contact",
     "torso_contact",
+    # per-part severity, attributed by geom (head capsule is welded to torso_link)
+    "peak_force_head",
+    "peak_force_torso",
+    "peak_force_hand",
+    "cum_impulse_head",
+    "cum_impulse_torso",
+    "cum_impulse_hand",
     "max_limit_violations",
 )
 
@@ -140,6 +147,11 @@ class PreFallResult:
     trigger_trip_force: torch.Tensor
     trigger_trip_body: torch.Tensor
     friction_baseline: torch.Tensor
+    # Perturbation diagnostics: what was applied and what the body did afterwards.
+    # These exist to explain a fall-vs-recovery outcome, not to score a policy.
+    diag_push_norm: torch.Tensor
+    diag_z_at_pert: torch.Tensor
+    diag_z_min_post: torch.Tensor
 
 
 class FallBenchmark:
@@ -603,6 +615,11 @@ class FallBenchmark:
 
         nominal: dict[str, torch.Tensor] = {key: torch.zeros(n, device=self.device) for key in METRIC_FIELDS}
 
+        # Perturbation diagnostics.
+        diag_push_norm = torch.zeros(n, device=self.device)
+        diag_z_at_pert = torch.full((n,), -1.0, device=self.device)
+        diag_z_min_post = torch.full((n,), float("inf"), device=self.device)
+
         max_steps = args.max_pre_steps + args.post_steps
         s = 1
         while s <= max_steps:
@@ -612,8 +629,14 @@ class FallBenchmark:
             # Start perturbations / restore slip and trip.
             start_ids = ((phase == 0) & (s == t_pert)).nonzero(as_tuple=False).flatten()
             if start_ids.numel() > 0:
+                started = [scenarios[i] for i in start_ids.tolist()]
+                diag_push_norm[start_ids] = torch.tensor(
+                    [float(np.linalg.norm(sc.push_dv[:2])) if sc.push_dv else 0.0 for sc in started],
+                    device=self.device,
+                )
+                diag_z_at_pert[start_ids] = self.sim.robot_root_states[start_ids, 2]
                 self._apply_factors(
-                    [scenarios[i] for i in start_ids.tolist()],
+                    started,
                     start_ids,
                     slip_end=slip_end,
                     slip_mu=slip_mu,
@@ -636,6 +659,13 @@ class FallBenchmark:
 
             actions = self._policy_actions(obs)
             obs, _, _, _ = self.env.step({"actions": actions, "obs": obs})
+
+            # Track how low the body got after the perturbation: a trial that
+            # "did not fall" should still show a measurable drop, and one that
+            # barely moved points at the perturbation not being applied.
+            z_now = self.sim.robot_root_states[:n, 2]
+            post_pert = phase >= 1
+            diag_z_min_post = torch.where(post_pert & (z_now < diag_z_min_post), z_now, diag_z_min_post)
 
             # Impact detection: T = first non-foot ground contact after perturbation.
             newly = (
@@ -710,6 +740,11 @@ class FallBenchmark:
             trigger_trip_force=trigger_trip_force,
             trigger_trip_body=trigger_trip_body,
             friction_baseline=slip_baseline,
+            diag_push_norm=diag_push_norm,
+            diag_z_at_pert=diag_z_at_pert,
+            diag_z_min_post=torch.where(
+                torch.isfinite(diag_z_min_post), diag_z_min_post, torch.full_like(diag_z_min_post, -1.0)
+            ),
         )
 
     def _prepare_branch(self, pre: PreFallResult, baseline: str) -> torch.Tensor:
@@ -943,8 +978,14 @@ class FallBenchmark:
                             "freeze_mode": scenario.freeze_mode or "",
                             "freeze_dofs": ";".join(map(str, scenario.freeze_dofs)),
                         }
+                        row["push_dv_norm"] = float(pre.diag_push_norm[i])
+                        row["root_z_at_pert"] = float(pre.diag_z_at_pert[i])
+                        row["root_z_min_post"] = float(pre.diag_z_min_post[i])
                         for key in METRIC_FIELDS:
                             row[key] = float(values[key][i].item())
+                        parts = {p: row[f"peak_force_{p}"] for p in ("head", "torso", "hand")}
+                        worst = max(parts, key=lambda k: parts[k])
+                        row["worst_hit_part"] = worst if parts[worst] > 0.0 else ""
                         writer.writerow(row)
                 f_csv.flush()
                 b += len(batch_ids)
@@ -971,6 +1012,10 @@ class FallBenchmark:
             "trip_force",
             "freeze_mode",
             "freeze_dofs",
+            "push_dv_norm",
+            "root_z_at_pert",
+            "root_z_min_post",
+            "worst_hit_part",
             *METRIC_FIELDS,
         ]
 

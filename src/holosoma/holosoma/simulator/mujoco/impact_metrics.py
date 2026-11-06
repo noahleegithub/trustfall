@@ -57,6 +57,12 @@ class ImpactTrialMetrics:
     cumulative_impulse: torch.Tensor
     illegal_contact: torch.Tensor
     torso_contact: torch.Tensor
+    peak_force_head: torch.Tensor
+    peak_force_torso: torch.Tensor
+    peak_force_hand: torch.Tensor
+    cum_impulse_head: torch.Tensor
+    cum_impulse_torso: torch.Tensor
+    cum_impulse_hand: torch.Tensor
     max_limit_violations: torch.Tensor
 
 
@@ -113,6 +119,25 @@ class ImpactMonitor:
         # illegal_contact would saturate that metric at 100% and destroy its ranking.
         self.severe_mask = self._body_mask(lower_names, severe_patterns)
 
+        # ---- part attribution (head / torso / hand) by GEOM, not body.
+        # On the G1 the head collision capsule is `<geom name="head_collision">`
+        # welded to torso_link, so body-level attribution merges head strikes into
+        # torso strikes. Geom ids arrive with every contact, so classify per contact.
+        self.PARTS: tuple[str, ...] = ("head", "torso", "hand")
+        geom_names = list(getattr(simulator, "geom_names", []) or [])
+        body_of_geom = np.asarray(simulator.root_model.geom_bodyid, dtype=np.int64)
+        body_name_by_id = {int(b): n for b, n in zip(list(simulator.body_ids), lower_names)}
+        self.geom_part = torch.full((max(len(geom_names), 1),), -1, dtype=torch.long, device=self.device)
+        for g, gname in enumerate(geom_names):
+            ln = str(gname).lower()
+            bn = body_name_by_id.get(int(body_of_geom[g]), "") if g < len(body_of_geom) else ""
+            if "head" in ln or "head" in bn:
+                self.geom_part[g] = 0
+            elif "torso" in ln or "torso" in bn:
+                self.geom_part[g] = 1
+            elif "wrist" in ln or "hand" in ln or "wrist" in bn or "hand" in bn:
+                self.geom_part[g] = 2
+
         # Raw body ids (0 == world).  ``body_parentid`` is static.
         parent = np.asarray(simulator.root_model.body_parentid, dtype=np.int64)
         self.parent = torch.as_tensor(parent, dtype=torch.long, device=self.device)
@@ -145,6 +170,9 @@ class ImpactMonitor:
             "limit_violations": torch.zeros(k, n, device=self.device),
             "illegal": torch.zeros(k, n, device=self.device),
             "severe": torch.zeros(k, n, device=self.device),
+            # per-part severity: peak force and accumulated impulse per control step
+            **{f"force_{p}": torch.zeros(k, n, device=self.device) for p in ("head", "torso", "hand")},
+            **{f"imp_{p}": torch.zeros(k, n, device=self.device) for p in ("head", "torso", "hand")},
         }
         self._step = {key: torch.zeros(n, device=self.device) for key in self._ring}
         self.first_contact_step = torch.full((n,), -1, dtype=torch.long, device=self.device)
@@ -215,7 +243,15 @@ class ImpactMonitor:
 
         qfrc_constraint = backend.get_constraint_forces()  # [N, nv]
         cfrc_int = backend.get_internal_wrenches()  # [N, nbody, 6] torque:force
-        contact_force, body1, body2, worldid, valid = backend.get_contact_forces_world()
+        (
+            contact_force,
+            body1,
+            body2,
+            worldid,
+            valid,
+            geom1_raw,
+            geom2_raw,
+        ) = backend.get_contact_forces_world()
 
         n = self.num_envs
         # ---- joint torque / torque ratio
@@ -279,6 +315,21 @@ class ImpactMonitor:
             severe = valid & external & (self.severe_mask[body1] | self.severe_mask[body2])
             severe_contact = _scatter_any(severe, worldid, n)
 
+            # ---- per-part impact severity (head / torso / hand), attributed by geom.
+            # Use the vector sum of the contacts on each part, so two contacts on the
+            # head in the same substep do not each get counted as the peak.
+            g1 = geom1_raw.to(device=self.device, dtype=torch.long).clamp(0, self.geom_part.shape[0] - 1)
+            g2 = geom2_raw.to(device=self.device, dtype=torch.long).clamp(0, self.geom_part.shape[0] - 1)
+            part_of_contact = torch.where(robot1, self.geom_part[g1], self.geom_part[g2])
+            for pid, pname in enumerate(self.PARTS):
+                selected = external & (part_of_contact == pid)
+                acc = torch.zeros(n, 3, device=self.device)
+                if bool(selected.any()):
+                    acc.index_add_(0, worldid[selected], f_robot[selected])
+                magnitude = torch.linalg.vector_norm(acc, dim=-1)
+                self._step[f"force_{pname}"] = torch.maximum(self._step[f"force_{pname}"], magnitude)
+                self._step[f"imp_{pname}"] = self._step[f"imp_{pname}"] + magnitude * self.dt
+
         # Per-link ground force (raw peak; the reward's [F - mg]+ form is built later).
         link_force = torch.linalg.vector_norm(ground_force[:, self.robot_body_ids, :], dim=-1)
         self._step["contact_force"] = torch.maximum(self._step["contact_force"], link_force.max(dim=1).values)
@@ -329,6 +380,12 @@ class ImpactMonitor:
                 cumulative_impulse=empty.clone(),
                 illegal_contact=empty.clone(),
                 torso_contact=empty.clone(),
+                peak_force_head=empty.clone(),
+                peak_force_torso=empty.clone(),
+                peak_force_hand=empty.clone(),
+                cum_impulse_head=empty.clone(),
+                cum_impulse_torso=empty.clone(),
+                cum_impulse_hand=empty.clone(),
                 max_limit_violations=empty.clone(),
             )
         env_ids = env_ids.to(device=self.device, dtype=torch.long)
@@ -356,6 +413,8 @@ class ImpactMonitor:
         cumulative = impulse.sum(dim=1)
         illegal = gather("illegal").max(dim=1).values > 0.5
         torso = gather("severe").max(dim=1).values > 0.5
+        peak_force = {p: gather(f"force_{p}").max(dim=1).values for p in ("head", "torso", "hand")}
+        cum_impulse = {p: gather(f"imp_{p}").sum(dim=1) for p in ("head", "torso", "hand")}
         limits = gather("limit_violations").max(dim=1).values
 
         return ImpactTrialMetrics(
@@ -367,6 +426,12 @@ class ImpactMonitor:
             cumulative_impulse=cumulative,
             illegal_contact=illegal,
             torso_contact=torso,
+            peak_force_head=peak_force["head"],
+            peak_force_torso=peak_force["torso"],
+            peak_force_hand=peak_force["hand"],
+            cum_impulse_head=cum_impulse["head"],
+            cum_impulse_torso=cum_impulse["torso"],
+            cum_impulse_hand=cum_impulse["hand"],
             max_limit_violations=limits,
         )
 
