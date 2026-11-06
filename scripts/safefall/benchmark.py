@@ -397,19 +397,6 @@ class FallBenchmark:
 
     # ------------------------------------------------------------------ rollout
 
-    def _trial_origin(self, trial_ids: list[int]) -> torch.Tensor:
-        """Deterministic spawn position for a trial, independent of batch size/slot.
-
-        The env slot otherwise decides the spawn position (terrain origins, plus an
-        optional random XY offset), which makes a trial's outcome depend on how many
-        environments happened to be batched with it.
-        """
-        out = torch.zeros(len(trial_ids), 2, device=self.device)
-        for i, tid in enumerate(trial_ids):
-            out[i, 0] = float((int(tid) % 64) * 4.0)
-            out[i, 1] = float((int(tid) // 64) * 4.0)
-        return out
-
     def _reset(self, commands: torch.Tensor, trial_ids: list[int]) -> dict:
         # Start every batch from a clean model/controller state.
         self.freeze_mode.zero_()
@@ -423,28 +410,19 @@ class FallBenchmark:
         term._kd_scale[:] = 1.0
 
         self.env.reset_all()
-        # Replace the slot-dependent spawn state with a trial-keyed one. The default
-        # reset puts each env at its own terrain origin and may draw a random XY
-        # offset from the global RNG; either makes results depend on batch composition.
+        # Do NOT override the root position. The terrain term broadcasts ONE origin to
+        # every env (locomotion.py: `self._env_origins[:] = origin_0_0`), so the default
+        # spawn is already independent of env slot. An earlier version placed trial i at
+        # (i%64*4, i//64*4) -- up to 252 m away, i.e. off the ground plane -- and those
+        # trials free-fell forever: fall yield collapsed 26% -> 3% and the "height"
+        # diagnostics read -8..-40 m because that is where the robots actually were.
         k = int(commands.shape[0])
         ids = torch.arange(k, device=self.device, dtype=torch.long)
-        base = self.env.base_init_state.to(self.device)
-        root = base.unsqueeze(0).repeat(k, 1).clone()
-        root[:, 0:2] = self._trial_origin(trial_ids)
-        self.sim.set_actor_root_state_tensor_robots(ids, root)
-        if not getattr(self, "_origin_logged", False):
-            logger.info(
-                f"Trial-keyed spawn: trial {trial_ids[0]} -> x,y="
-                f"({float(root[0, 0]):.1f}, {float(root[0, 1]):.1f}), z={float(root[0, 2]):.3f} "
-                f"(independent of env slot / NUM_ENVS)"
-            )
-            self._origin_logged = True
         dof = torch.zeros(self.num_envs, self.ndof, 2, device=self.device)
         base_pos = self.env.default_dof_pos.to(self.device)
         # Mirror the env's own reset distribution -- joint_pos = default * U(0.5, 1.5),
         # joint_vel = 0 -- but draw it per trial so it is reproducible and independent
-        # of batch layout. Replacing this with a single fixed pose made the robot far
-        # too stable: fall yield fell from 27% to 5% at identical perturbation strength.
+        # of batch layout (the env draws it from the global RNG).
         for i, tid in enumerate(trial_ids):
             rng = np.random.default_rng(self.args.seed * 100003 + int(tid) * 7919 + 41)
             scale = torch.as_tensor(
@@ -641,9 +619,8 @@ class FallBenchmark:
                     [float(np.linalg.norm(sc.push_dv[:2])) if sc.push_dv else 0.0 for sc in started],
                     device=self.device,
                 )
-                # NB: robot_root_states is a proxy view (create_root_view) and 2-D
-                # indexing it returns garbage -- every other call site clones first.
-                # Use the clone already snapshotted at the top of this iteration.
+                # Read from the clone snapshotted at the top of this iteration, so the
+                # value matches the state used for the trigger snapshot.
                 diag_z_at_pert[start_ids] = state_root[s % k_state][start_ids, 2]
                 self._apply_factors(
                     started,
@@ -673,7 +650,7 @@ class FallBenchmark:
             # Track how low the body got after the perturbation: a trial that
             # "did not fall" should still show a measurable drop, and one that
             # barely moved points at the perturbation not being applied.
-            z_now = self.sim.robot_root_states.clone()[:n, 2]  # clone: proxy view, see above
+            z_now = self.sim.robot_root_states.clone()[:n, 2]
             post_pert = phase >= 1
             diag_z_min_post = torch.where(post_pert & (z_now < diag_z_min_post), z_now, diag_z_min_post)
 
