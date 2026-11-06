@@ -49,6 +49,21 @@ physics substep:
 
 Measured fall yields on the G1 (200 trials, 64 environments, seed 0):
 
+Trip mode changes the verdict on that factor by more than an order of magnitude
+(200 trials each, paper preset, same seed):
+
+| trip mode | trip trials that fell | overall yield | head peak (max) | torso peak (max) |
+|---|---|---|---|---|
+| `obstacle` (5–15 cm box) | **96%** | **50%** | 20.4 kN | 19.0 kN |
+| `force` (150–400 N) | 29% | 25% | 10.2 kN | 13.9 kN |
+
+Non-trip trials are unaffected by mode (20% vs 22% fell), so the difference is entirely
+the hazard: a real foot-catch pitches the robot forward onto its head, whereas the
+synthetic foot force tends to topple it sideways onto the torso. The 5–15 cm band is
+kept deliberately — a near-certain trip is the honest model of a swing foot meeting an
+obstacle, and the paper specifies no target yield. Treat 50% (obstacle) as the current
+overall figure; the 26% figure below is the earlier force-mode measurement.
+
 | preset | yield | freeze | push | slip | trip |
 |---|---|---|---|---|---|
 | `paper` | **26%** | 28% | 40% | 14% | 22% |
@@ -57,6 +72,9 @@ Measured fall yields on the G1 (200 trials, 64 environments, seed 0):
 `paper` is the default: it reproduces the write-up's perturbation regime and gives
 ~1,300 usable falls from a 5,000-trial run, which is ample. `calibrated` is a
 separate stress profile, not a correction of `paper`.
+
+These per-mechanism figures were measured in **force** mode (synthetic trip). With the
+default obstacle trip the trip row becomes 96%, and overall yield ~50%.
 
 An earlier version of this note reported a 3-5% yield at `paper` strength and argued
 the ranges were too weak. That measurement was invalid — a spawn bug was placing
