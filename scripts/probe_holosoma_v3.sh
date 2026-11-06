@@ -57,7 +57,7 @@ hdr "Optional: reusable sandbox from the registry (avoids per-exec extraction)"
 SANDBOX="${SANDBOX:-${TMPDIR:-/tmp}/safefall-rootfs}"
 if [[ -d "$SANDBOX" ]]; then ok "sandbox exists: $SANDBOX"; else
   if type module >/dev/null 2>&1 && [[ -n "${SLURM_JOB_ID:-}" ]]; then module load WebProxy || true; fi
-  if "$CONTAINER" build --sandbox --force "$SANDBOX" docker://ghcr.io/noahleegithub/safefall-mujoco:sha-044bcb8; then
+  if "$CONTAINER" build --sandbox --force "$SANDBOX" docker://ghcr.io/noahleegithub/safefall-mujoco:latest; then
     ok "built sandbox: $SANDBOX"
   else
     no "sandbox build from registry failed (SIF path still works, just slower)"

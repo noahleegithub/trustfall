@@ -22,13 +22,15 @@
 #   CLEAN_SCRATCH, DOCKER_USERNAME, DOCKER_PASSWORD
 set -u
 
-# Pin an immutable tag. `1.0.0` is a STALE image (manifest 9b47d036...); the
-# current build is sha-044bcb8 == 2026_1031_2111 (manifest 27ec954b...).
-# Check before bumping:
+# `latest` is the convenience tag: it tracks the newest *verified* build and is
+# re-pushed only after a GPU environment-construction smoke passes. It is mutable,
+# so for an archival/reproducible run pass the immutable tag explicitly:
+#   IMAGE_URI=docker://ghcr.io/noahleegithub/safefall-mujoco:sha-<commit> bash scripts/build_sif.sh
+# Check which build a tag points at:
 #   T=$(curl -s "https://ghcr.io/token?scope=repository:noahleegithub/safefall-mujoco:pull&service=ghcr.io" | jq -r .token)
 #   curl -sI -H "Authorization: Bearer $T" -H 'Accept: application/vnd.oci.image.index.v1+json' \
-#     https://ghcr.io/v2/noahleegithub/safefall-mujoco/manifests/<tag> | grep -i docker-content-digest
-IMAGE_URI="${IMAGE_URI:-docker://ghcr.io/noahleegithub/safefall-mujoco:sha-044bcb8}"
+#     https://ghcr.io/v2/noahleegithub/safefall-mujoco/manifests/latest | grep -i docker-content-digest
+IMAGE_URI="${IMAGE_URI:-docker://ghcr.io/noahleegithub/safefall-mujoco:latest}"
 SIF="${SIF:-${SCRATCH:-/scratch}/images/safefall-mujoco.sif}"
 FORCE="${FORCE:-0}"
 VERIFY="${VERIFY:-1}"
@@ -146,6 +148,12 @@ if [[ "$PULL" == "1" ]]; then
   mv -f "$TMP_SIF" "$SIF"
   trap - EXIT INT TERM
   ok "pulled $SIF"
+  case "$IMAGE_URI" in
+    *:latest|*@latest)
+      warn "resolved the MUTABLE ':latest' tag; record this pull date with any results"
+      ;;
+    *) ok "pinned image: $IMAGE_URI" ;;
+  esac
 fi
 
 # ---- verify ----

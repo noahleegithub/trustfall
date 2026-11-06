@@ -14,7 +14,7 @@
 # Overridable: SIF, RUNS, SANDBOX, IMAGE_URI, CLEAN_SCRATCH (set 1 to delete leftover rootfs-*)
 set -u
 
-IMAGE_URI="${IMAGE_URI:-docker://ghcr.io/noahleegithub/safefall-mujoco:sha-044bcb8}"
+IMAGE_URI="${IMAGE_URI:-docker://ghcr.io/noahleegithub/safefall-mujoco:latest}"
 SIF="${SIF:-$SCRATCH/images/safefall-mujoco.sif}"
 RUNS="${RUNS:-$SCRATCH/runs}"
 SANDBOX="${SANDBOX:-${TMPDIR:-/tmp}/safefall-rootfs}"
