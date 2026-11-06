@@ -641,7 +641,10 @@ class FallBenchmark:
                     [float(np.linalg.norm(sc.push_dv[:2])) if sc.push_dv else 0.0 for sc in started],
                     device=self.device,
                 )
-                diag_z_at_pert[start_ids] = self.sim.robot_root_states[start_ids, 2]
+                # NB: robot_root_states is a proxy view (create_root_view) and 2-D
+                # indexing it returns garbage -- every other call site clones first.
+                # Use the clone already snapshotted at the top of this iteration.
+                diag_z_at_pert[start_ids] = state_root[s % k_state][start_ids, 2]
                 self._apply_factors(
                     started,
                     start_ids,
@@ -670,7 +673,7 @@ class FallBenchmark:
             # Track how low the body got after the perturbation: a trial that
             # "did not fall" should still show a measurable drop, and one that
             # barely moved points at the perturbation not being applied.
-            z_now = self.sim.robot_root_states[:n, 2]
+            z_now = self.sim.robot_root_states.clone()[:n, 2]  # clone: proxy view, see above
             post_pert = phase >= 1
             diag_z_min_post = torch.where(post_pert & (z_now < diag_z_min_post), z_now, diag_z_min_post)
 
