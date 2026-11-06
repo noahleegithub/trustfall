@@ -56,13 +56,17 @@ def _robot_base_init():
     return torch.tensor(list(init.pos) + list(init.rot) + list(init.lin_vel) + list(init.ang_vel))
 
 
-def build_classic_sim(scene: SceneConfig | None = None):
-    """Build a ClassicBackend MuJoCo sim (CPU, single env) for ``scene`` (default: empty)."""
+def build_classic_sim(scene: SceneConfig | None = None, terrain=None):
+    """Build a ClassicBackend MuJoCo sim (CPU, single env) for ``scene`` (default: empty).
+
+    ``terrain`` overrides the terrain manager config (default: the run-sim plane preset).
+    """
     from holosoma.utils.sim_utils import setup_simulation_environment
 
     sim_cfg = _bridge_gantry_off(run_sim_values.mujoco)
+    overrides = {} if terrain is None else {"terrain": terrain}
     config = dataclasses.replace(
-        RunSimConfig(simulator=sim_cfg, robot=robot_values.g1_29dof, scene=scene or SceneConfig()),
+        RunSimConfig(simulator=sim_cfg, robot=robot_values.g1_29dof, scene=scene or SceneConfig(), **overrides),
         device="cpu",
     )
     env, device, _ = setup_simulation_environment(config, device="cpu")

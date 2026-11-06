@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import field
 from enum import Enum
 
@@ -108,7 +109,6 @@ class SpawnCfg:
 
 
 @dataclass(frozen=True)
-@dataclass
 class ObstacleCfg:
     """A single welded box obstacle that can be relocated per environment.
 
@@ -126,6 +126,7 @@ class ObstacleCfg:
     rgba: tuple[float, float, float, float] = (0.85, 0.25, 0.15, 1.0)
 
 
+@dataclass(frozen=True)
 class TerrainTermCfg:
     """Configuration for the terrain manager.
 
@@ -235,3 +236,18 @@ class TerrainTermCfg:
 class TerrainManagerCfg:
     terrain_term: TerrainTermCfg
     """Configuration for the terrain term. Only one terrain term is supported."""
+
+
+def with_obstacle(terrain: TerrainManagerCfg, obstacle: ObstacleCfg) -> TerrainManagerCfg:
+    """Return ``terrain`` with ``obstacle`` attached to its terrain term (nothing mutated).
+
+    Both configs are frozen, so this is a ``dataclasses.replace`` chain — the same surgery
+    ``ExperimentConfig.get_eval_config`` performs for ``spawn``. Callers that need a trip
+    hazard (the SafeFall benchmark's obstacle mode) attach it here and let the scene
+    manager's terrain builder add the welded box body.
+    """
+    return dataclasses.replace(
+        terrain,
+        terrain_term=dataclasses.replace(terrain.terrain_term, obstacle=obstacle),
+    )
+

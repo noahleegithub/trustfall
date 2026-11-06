@@ -102,3 +102,9 @@ class TerrainTermBase(ABC):
     @property
     def hide_visual(self) -> bool:
         return self._cfg.hide_visual
+
+    @property
+    def obstacle(self):
+        """Optional welded box obstacle config (``None`` = no obstacle in the scene)."""
+        # getattr, not attribute access: non-MuJoCo terrain cfgs may predate the field.
+        return getattr(self._cfg, "obstacle", None)
