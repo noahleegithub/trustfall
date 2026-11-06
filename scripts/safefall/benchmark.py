@@ -1057,6 +1057,12 @@ class FallBenchmark:
             "post_end": int(pre.post_end[i]),
             "valid": bool(pre.valid[i]),
             "recovery": bool(pre.recovery[i]),
+            # Perturbation diagnostics live here, not only in the CSV: a trial that
+            # recovers writes no CSV rows, so the CSV alone cannot answer "did the
+            # perturbation actually move the robot?" for the trials that didn't fall.
+            "push_dv_norm": float(pre.diag_push_norm[i]),
+            "root_z_at_pert": float(pre.diag_z_at_pert[i]),
+            "root_z_min_post": float(pre.diag_z_min_post[i]),
         }
 
     def close(self) -> None:
