@@ -8,11 +8,14 @@ the paper's three baselines from the same trigger state:
 * ``default``  -- hold the default joint targets with nominal PD gains
 * ``damping``  -- Kp ~= 0, Kd = 10, constant target
 
-The fall is induced by 1-3 of: torso push, friction slip, foot push (trip), and
-actuator failure (motor-off or brake-lock).  The impact window starts at
-``T - 300 ms`` (oracle trigger), where ``T`` is the first non-foot ground contact
-after the perturbation.  Metrics are the SafeFall Table IV metrics implemented in
-``holosoma.simulator.mujoco.impact_metrics``.
+The fall is induced by 1-3 of: torso push, friction slip, foot trip, and actuator
+failure (motor-off or brake-lock).  The trip factor has two modes: ``--trip-mode
+obstacle`` (default) places a real box in front of the robot at the trigger so the foot
+physically catches on it, and ``--trip-mode force`` applies a horizontal force to the
+swing foot (the original synthetic trip, kept for reproducing older runs).  The impact
+window starts at ``T - 300 ms`` (oracle trigger), where ``T`` is the first non-foot
+ground contact after the perturbation.  Metrics are the SafeFall Table IV metrics
+implemented in ``holosoma.simulator.mujoco.impact_metrics``.
 
 Usage (single shard, pilot)::
 
@@ -37,10 +40,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
+from loguru import logger
+
 from holosoma.config_types.plugin import CameraVizPluginConfig
 from holosoma.config_types.randomization import RandomizationManagerCfg
 from holosoma.config_types.simulator import MujocoWarpConfig
 from holosoma.config_types.termination import TerminationManagerCfg
+from holosoma.config_types.terrain import ObstacleCfg, with_obstacle
 from holosoma.config_values.logger import disabled as disabled_logger
 from holosoma.config_values.sensor import CAMERA_REGISTRY
 from holosoma.config_values.simulator import mjwarp as mjwarp_preset
@@ -54,10 +60,15 @@ from holosoma.utils.eval_utils import (
 from holosoma.utils.helpers import get_class
 from holosoma.utils.safe_torch_import import torch
 from holosoma.utils.sim_utils import close_simulation_app, setup_simulation_environment
-from loguru import logger
+
+try:  # ``python -m scripts.safefall.benchmark`` (repo root on sys.path)
+    from scripts.safefall.trip_placement import plan_trip_obstacle
+except ModuleNotFoundError:  # the diag_*.py scripts add this directory to sys.path and import this module flat
+    from trip_placement import plan_trip_obstacle
 
 MECHANISMS = ("push", "slip", "trip", "freeze")
 BASELINES = ("nominal", "default", "damping")
+TRIP_MODES = ("obstacle", "force")
 
 # Perturbation profiles. Measured fall yields on the G1 (200 trials, 64 envs, seed 0,
 # corrected spawn): ``paper`` 26%, ``calibrated`` 62%.
@@ -121,6 +132,12 @@ class Scenario:
     slip_steps: int = 0
     trip_force: float | None = None
     trip_steps: int = 0
+    # Obstacle-mode trip: sampled top-face height at build time, direction/distance
+    # resolved at the trigger from the robot's live motion. All None in force mode.
+    trip_height: float | None = None
+    trip_distance: float | None = None
+    trip_dir_x: float | None = None
+    trip_dir_y: float | None = None
     freeze_mode: str | None = None
     freeze_dofs: list[int] = field(default_factory=list)
 
@@ -164,8 +181,13 @@ class FallBenchmark:
         self.device = args.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
         self.output_dir = Path(args.output_dir).expanduser()
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.obstacle_cfg: ObstacleCfg | None = None
+        self.obstacle_body_id: int | None = None
+        self.obstacle_half_height: float | None = None
+        self.obstacle_park_z: float | None = None
         self._build_config()
         self._build_env()
+        self._setup_obstacle()
         self._setup_monitor()
         self._install_freeze_override()
 
@@ -204,6 +226,11 @@ class FallBenchmark:
                 seed=self.args.seed,
             ),
         )
+        if self.args.trip_mode == "obstacle":
+            # A real trip hazard instead of the synthetic foot force. Only this mode adds
+            # the body, so force mode compiles exactly the model it always did.
+            self.obstacle_cfg = ObstacleCfg()
+            cfg = dataclasses.replace(cfg, terrain=with_obstacle(cfg.terrain, self.obstacle_cfg))
         if render:
             cfg = dataclasses.replace(cfg, sensor={"cam": CAMERA_REGISTRY[self.args.render_camera]})
         else:
@@ -255,6 +282,30 @@ class FallBenchmark:
 
         self.env.set_is_evaluating()
         self._zeros_actions = torch.zeros(self.num_envs, self.ndof, device=self.device)
+
+    def _setup_obstacle(self) -> None:
+        """Resolve the trip-hazard body id and its half height (no-op in force mode)."""
+        if self.args.trip_mode != "obstacle":
+            return
+        cfg = self.obstacle_cfg
+        if cfg is None:  # _build_config always sets it in obstacle mode; guard the invariant
+            raise RuntimeError("trip mode is 'obstacle' but no ObstacleCfg was injected")
+        import mujoco
+
+        body_id = int(mujoco.mj_name2id(self.sim.root_model, mujoco.mjtObj.mjOBJ_BODY, cfg.name))
+        if body_id < 0:
+            raise RuntimeError(
+                f"trip mode 'obstacle' needs a model body named '{cfg.name}', but the compiled "
+                "model has none. The terrain builder only adds it when TerrainTermCfg.obstacle "
+                "is set and the terrain mesh type is not 'none'/'fake'."
+            )
+        self.obstacle_body_id = body_id
+        self.obstacle_half_height = float(cfg.half_extents[2])
+        self.obstacle_park_z = float(cfg.pos[2])
+        logger.info(
+            f"Trip obstacle '{cfg.name}' -> body id {body_id}, "
+            f"half_extents={tuple(float(v) for v in cfg.half_extents)}, parked at z={self.obstacle_park_z}"
+        )
 
     def _setup_monitor(self) -> None:
 
@@ -377,8 +428,14 @@ class FallBenchmark:
                 1, round(rng.uniform(args.slip_duration_min, args.slip_duration_max) * self.control_hz)
             )
         if "trip" in mechanisms:
-            scenario.trip_force = float(rng.uniform(args.trip_force_min, args.trip_force_max))
-            scenario.trip_steps = max(1, round(args.trip_duration * self.control_hz))
+            if args.trip_mode == "force":
+                # Unchanged draw order: force mode must keep reproducing old scenarios.
+                scenario.trip_force = float(rng.uniform(args.trip_force_min, args.trip_force_max))
+                scenario.trip_steps = max(1, round(args.trip_duration * self.control_hz))
+            else:
+                # Obstacle mode: the height is sampled now; direction and distance need the
+                # robot's live motion, so they are resolved at the trigger (_apply_factors).
+                scenario.trip_height = float(rng.uniform(args.trip_height_min, args.trip_height_max))
         if "freeze" in mechanisms:
             scenario.freeze_mode = str(
                 rng.choice(["motor_off", "brake_lock"], p=[args.freeze_motor_off_p, 1.0 - args.freeze_motor_off_p])
@@ -412,6 +469,10 @@ class FallBenchmark:
         term._kd_scale[:] = 1.0
 
         self.env.reset_all()
+        # Park the trip hazard below the floor: a batch without a trip, and every non-trip
+        # trial in a mixed batch, must see an unmodified scene. (reset_all resets data, not
+        # model geometry, so this is the only place the box is cleared.)
+        self._park_obstacle()
         # Do NOT override the root position. The terrain term broadcasts ONE origin to
         # every env (locomotion.py: `self._env_origins[:] = origin_0_0`), so the default
         # spawn is already independent of env slot. An earlier version placed trial i at
@@ -445,6 +506,22 @@ class FallBenchmark:
             af.zero_()
         else:
             af.fill(0.0)
+
+    def _park_obstacle(self) -> None:
+        """Sink the trip obstacle below the ground plane for every env (no-op without one)."""
+        if self.obstacle_body_id is None or self.obstacle_park_z is None:
+            return
+        n = self.num_envs
+        positions = torch.zeros(n, 1, 3, device=self.device)
+        positions[:, 0, 2] = self.obstacle_park_z
+        quats = torch.zeros(n, 1, 4, device=self.device)
+        quats[:, 0, 3] = 1.0  # xyzw identity
+        self.sim.backend.set_static_body_world_pose(
+            [self.obstacle_body_id],
+            positions,
+            quats,
+            env_ids=torch.arange(n, device=self.device, dtype=torch.long),
+        )
 
     def _actor_obs(self, obs: dict) -> torch.Tensor:
         return torch.cat([obs[k] for k in self.algo.actor_obs_keys], dim=1)
@@ -509,6 +586,36 @@ class FallBenchmark:
             t_pert = torch.tensor([scenarios[j].t_pert for j in slip_local], device=self.device, dtype=torch.long)
             slip_end[idx] = t_pert + steps
             slip_mu[idx] = mu
+
+        # trip (obstacle mode): put the box in front of the robot's current motion so the
+        # swing foot physically catches on it. Obstacle-mode scenarios carry no trip_force,
+        # so the force block below skips them; the force block is untouched otherwise.
+        obstacle_local = [j for j, s in enumerate(scenarios) if s.trip_height is not None]
+        if obstacle_local and self.obstacle_body_id is not None and self.obstacle_half_height is not None:
+            idx = env_ids[obstacle_local]
+            # A clone is required: the root_states proxy view misbehaves with 2-D indexing.
+            root = self.sim.robot_root_states.clone()
+            plan = plan_trip_obstacle(
+                base_xy=root[idx, 0:2].detach().cpu().numpy(),
+                velocity_xy=root[idx, 7:9].detach().cpu().numpy(),
+                command_xy=np.asarray([scenarios[j].command[0:2] for j in obstacle_local], dtype=np.float64),
+                trip_height=np.asarray([scenarios[j].trip_height for j in obstacle_local], dtype=np.float64),
+                half_height=self.obstacle_half_height,
+                lead_time=float(self.args.trip_lead_time),
+                min_distance=float(self.args.trip_min_distance),
+                max_distance=float(self.args.trip_max_distance),
+            )
+            for k, j in enumerate(obstacle_local):
+                scenario = scenarios[j]
+                scenario.trip_distance = float(plan.distance[k])
+                scenario.trip_dir_x = float(plan.direction[k, 0])
+                scenario.trip_dir_y = float(plan.direction[k, 1])
+            self.sim.backend.set_static_body_world_pose(
+                [self.obstacle_body_id],
+                torch.as_tensor(plan.center[:, None, :], device=self.device, dtype=torch.float32),
+                torch.as_tensor(plan.quat[:, None, :], device=self.device, dtype=torch.float32),
+                env_ids=idx,
+            )
 
         # trip: push the swing foot (lower normal force)
         trip_local = [j for j, s in enumerate(scenarios) if s.trip_force is not None]
@@ -975,6 +1082,11 @@ class FallBenchmark:
                             "push_dv_y": scenario.push_dv[1] if scenario.push_dv else 0.0,
                             "slip_mu": scenario.slip_mu or 0.0,
                             "trip_force": scenario.trip_force or 0.0,
+                            "trip_mode": args.trip_mode,
+                            "trip_height": scenario.trip_height or 0.0,
+                            "trip_distance": scenario.trip_distance or 0.0,
+                            "trip_dir_x": scenario.trip_dir_x or 0.0,
+                            "trip_dir_y": scenario.trip_dir_y or 0.0,
                             "freeze_mode": scenario.freeze_mode or "",
                             "freeze_dofs": ";".join(map(str, scenario.freeze_dofs)),
                         }
@@ -1010,6 +1122,11 @@ class FallBenchmark:
             "push_dv_y",
             "slip_mu",
             "trip_force",
+            "trip_mode",
+            "trip_height",
+            "trip_distance",
+            "trip_dir_x",
+            "trip_dir_y",
             "freeze_mode",
             "freeze_dofs",
             "push_dv_norm",
@@ -1032,6 +1149,11 @@ class FallBenchmark:
             "slip_steps": scenario.slip_steps,
             "trip_force": scenario.trip_force,
             "trip_steps": scenario.trip_steps,
+            "trip_mode": self.args.trip_mode,
+            "trip_height": scenario.trip_height,
+            "trip_distance": scenario.trip_distance,
+            "trip_dir_x": scenario.trip_dir_x,
+            "trip_dir_y": scenario.trip_dir_y,
             "freeze_mode": scenario.freeze_mode,
             "freeze_dofs": scenario.freeze_dofs,
             "t_step": int(pre.t_step[i]),
@@ -1108,6 +1230,44 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--trip-force-min", type=float, default=None)
     p.add_argument("--trip-force-max", type=float, default=None)
     p.add_argument("--trip-duration", type=float, default=None)
+    p.add_argument(
+        "--trip-mode",
+        choices=TRIP_MODES,
+        default="obstacle",
+        help="'obstacle' (default) places a real box in front of the robot's motion at the "
+        "trigger; 'force' applies a horizontal force to the swing foot (the previous "
+        "synthetic trip, kept for reproducing older runs).",
+    )
+    p.add_argument(
+        "--trip-height-min",
+        type=float,
+        default=0.05,
+        help="Obstacle mode: lower bound of the per-trial top-face height above ground (m).",
+    )
+    p.add_argument(
+        "--trip-height-max",
+        type=float,
+        default=0.15,
+        help="Obstacle mode: upper bound of the per-trial top-face height above ground (m).",
+    )
+    p.add_argument(
+        "--trip-lead-time",
+        type=float,
+        default=0.30,
+        help="Obstacle mode: seconds of travel ahead of the base at which the box is placed.",
+    )
+    p.add_argument(
+        "--trip-min-distance",
+        type=float,
+        default=0.25,
+        help="Obstacle mode: minimum distance ahead of the base (m); floor of the clamp.",
+    )
+    p.add_argument(
+        "--trip-max-distance",
+        type=float,
+        default=1.0,
+        help="Obstacle mode: maximum distance ahead of the base (m); ceiling of the clamp.",
+    )
     p.add_argument("--freeze-motor-off-p", type=float, default=None,
                    help="Probability a freeze scenario is motor-off rather than brake-lock.")
     p.add_argument("--freeze-two-joint-p", type=float, default=None,

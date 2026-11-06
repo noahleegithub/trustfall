@@ -36,13 +36,14 @@ physics substep:
 `--preset` selects the perturbation strength. The active preset is recorded in
 `manifest.json`; quote it with any result.
 
-| parameter | `paper` | `calibrated` (default) |
+| parameter | `paper` | `calibrated` |
 |---|---|---|
 | push `|dv|` | 1.5–3.5 m/s | 2.5–4.5 m/s |
 | slip friction | 0.02–0.15 | 0.01–0.08 |
 | slip duration | 0.10–0.30 s | 0.20–0.50 s |
-| trip force | 150–400 N | 400–800 N |
-| trip duration | 0.05 s | 0.10 s |
+| trip (default, obstacle mode): top-face height | 0.05–0.15 m | 0.05–0.15 m |
+| trip (force mode only): force | 150–400 N | 400–800 N |
+| trip (force mode only): duration | 0.05 s | 0.10 s |
 | freeze motor-off probability | 0.5 | 0.8 |
 | freeze two-joint probability | 0.30 | 0.55 |
 
@@ -69,7 +70,9 @@ A trial is: walk 1-2 s with the nominal policy, then apply 1-3 of:
 
 - **push** — horizontal base velocity perturbation, 1.5-3.5 m/s
 - **slip** — lower the foot sliding friction to `[0.02, 0.15]` for 0.1-0.3 s
-- **trip** — 150-400 N horizontal force on the swing foot for ~50 ms
+- **trip** — a box hazard placed in front of the robot at the trigger (`--trip-mode
+  obstacle`, default); `--trip-mode force` keeps the original 150-400 N horizontal force
+  on the swing foot for ~50 ms
 - **freeze** — motor-off (zero torque) or brake-lock (hold the failure angle) on 1-2 joints
 
 The first non-foot ground contact after the perturbation is `T`. The oracle trigger is
@@ -78,6 +81,43 @@ baseline runs continuously; `default`/`damping` branch from the saved trigger st
 
 The benchmark disables domain randomization and termination so all baselines are paired
 and the post-impact sequence is not cut short.
+
+### Trip hazard: box obstacle vs synthetic force
+
+`--trip-mode obstacle` (default) is a real hazard: a welded 30 x 30 cm box, 10 cm tall,
+added to the scene by the terrain builder (`TerrainTermCfg.obstacle`) and moved every
+trial at the moment the trip factor fires, so the swing foot physically catches on it.
+
+Placement rule, applied per trial at the trigger (implementation:
+`scripts/safefall/trip_placement.py`, unit-tested in
+`src/holosoma/tests/test_trip_placement.py`):
+
+| quantity | rule |
+|---|---|
+| direction | unit base velocity (pelvis xy, `|v| >= 0.15 m/s`), else the commanded heading, else `+x` |
+| distance | `clamp(speed * 0.30 s, 0.25 m, 1.0 m)` — `--trip-lead-time`, `--trip-min-distance`, `--trip-max-distance` |
+| top-face height | sampled per trial from `[0.05, 0.15]` m — `--trip-height-min/--trip-height-max` |
+| box centre z | `trip_height - 0.05`, so the top face sits at the sampled height and the lower half sinks into the ground |
+| yaw | `atan2(dir_y, dir_x)`; the box face is perpendicular to travel |
+
+Outside the trip window the box is parked at `z = -5 m` (below the floor), so non-trip
+trials and batches without a trip see an unmodified scene. It stays where it was placed
+through `reset_all()` — the branch resets restore robot state and friction, not model
+geometry — so the `default` and `damping` branches face the same hazard as `nominal`.
+
+The horizontal speed also sets the distance: a robot walking at 1 m/s gets the box 0.30 m
+ahead, a standing robot 0.25 m. Because the box is placed at the trigger and not scripted
+afterwards, the trip is only as repeatable as the walking state at that instant; the
+resolved height/direction/distance are written to each CSV row (`trip_mode`,
+`trip_height`, `trip_distance`, `trip_dir_x`, `trip_dir_y`) and to the scenario JSONL, and
+`scripts/safefall/diag_trip_obstacle.py` prints the world pose actually applied.
+
+`--trip-mode force` keeps the old behaviour byte-for-byte (150-400 N on the swing foot
+for ~50 ms at `paper` strength) for reproducing earlier runs. The trip force columns are
+populated in that mode only; in obstacle mode `trip_force` is `0.0` and
+`trip_height`/`trip_distance`/`trip_dir_*` carry the hazard. Both modes write the same
+columns, so a mixed-mode output directory still passes the header check — check
+`trip_mode` (it is in every row and in `manifest.json`) before pooling two runs.
 
 ## HPRC / ACES workflow
 
