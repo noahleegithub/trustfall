@@ -421,7 +421,17 @@ class FallBenchmark:
             )
             self._origin_logged = True
         dof = torch.zeros(self.num_envs, self.ndof, 2, device=self.device)
-        dof[:, :, 0] = self.env.default_dof_pos.to(self.device)
+        base_pos = self.env.default_dof_pos.to(self.device)
+        # Mirror the env's own reset distribution -- joint_pos = default * U(0.5, 1.5),
+        # joint_vel = 0 -- but draw it per trial so it is reproducible and independent
+        # of batch layout. Replacing this with a single fixed pose made the robot far
+        # too stable: fall yield fell from 27% to 5% at identical perturbation strength.
+        for i, tid in enumerate(trial_ids):
+            rng = np.random.default_rng(self.args.seed * 100003 + int(tid) * 7919 + 41)
+            scale = torch.as_tensor(
+                rng.uniform(0.5, 1.5, self.ndof), dtype=torch.float32, device=self.device
+            )
+            dof[i, :, 0] = base_pos[i] * scale
         self.sim.set_dof_state_tensor_robots(ids, dof.reshape(-1, 2))
         self.env.command_manager.commands[: commands.shape[0]] = commands.to(self.device)
         self.env.observation_manager.reset()
