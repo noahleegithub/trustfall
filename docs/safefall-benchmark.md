@@ -46,12 +46,22 @@ physics substep:
 | freeze motor-off probability | 0.5 | 0.8 |
 | freeze two-joint probability | 0.30 | 0.55 |
 
-Measured on the G1 with the `paper` ranges, only 27% of scenarios produced a fall,
-and the weakest mechanisms were slip (16%) and trip (18%); push above 3.0 m/s fell
-85% of the time and `motor_off` froze fell ~3x more often than `brake_lock`. The
-`calibrated` preset shifts each mechanism toward the regime that actually topples
-this policy. **This is a deviation from the paper's protocol** — use `--preset paper`
-when the number must match the write-up, and say which was used either way.
+Measured fall yields on the G1 (200 trials, 64 environments, seed 0):
+
+| preset | yield | freeze | push | slip | trip |
+|---|---|---|---|---|---|
+| `paper` | **26%** | 28% | 40% | 14% | 22% |
+| `calibrated` | **62%** | 58% | 74% | 22% | 92% |
+
+`paper` is the default: it reproduces the write-up's perturbation regime and gives
+~1,300 usable falls from a 5,000-trial run, which is ample. `calibrated` is a
+separate stress profile, not a correction of `paper`.
+
+An earlier version of this note reported a 3-5% yield at `paper` strength and argued
+the ranges were too weak. That measurement was invalid — a spawn bug was placing
+trials off the ground plane, so most robots free-fell without ever touching ground
+(see the note on spawn position below). Do not tune perturbation strength against a
+yield that has not been checked against the terrain extent.
 
 ## Fall scenarios
 
@@ -109,6 +119,13 @@ videos/trial_<id>_<baseline>.mp4
 
 `TRIALS` is the total across shards; each shard takes `trial_id % shards == shard`.
 `SHARDS` must match the Slurm array size.
+
+**Spawn position.** Do not override the root position in `_reset`. The terrain term
+broadcasts a single origin to every environment, so the default spawn is already
+independent of env slot; an override that placed trial *i* on its own grid put trials
+up to 252 m from the origin — off the plane — and they free-fell forever. Symptom:
+a 10x drop in fall yield plus recorded heights of -8 to -40 m. Those heights were
+correct measurements of robots below the floor, not corrupt data.
 
 **`NUM_ENVS` is part of the reported configuration.** Fall dynamics are chaotic, so a
 trial is not numerically reproducible across `NUM_ENVS` even though its scenario spec

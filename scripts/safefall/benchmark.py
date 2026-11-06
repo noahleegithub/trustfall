@@ -59,12 +59,14 @@ from loguru import logger
 MECHANISMS = ("push", "slip", "trip", "freeze")
 BASELINES = ("nominal", "default", "damping")
 
-# Perturbation profiles. ``paper`` is the range quoted in the SafeFall write-up;
-# ``calibrated`` was raised after measuring a 27% fall rate on the G1 at ``paper``
-# strength (push |dv|>3.0 m/s fell 85% of the time, slip mu<0.08 only 23%, trip
-# >300 N only 38%), i.e. the paper ranges barely disturb this policy. Deviating
-# from ``paper`` changes the experiment definition, so the active profile is
-# recorded in the run manifest -- quote it alongside results.
+# Perturbation profiles. Measured fall yields on the G1 (200 trials, 64 envs, seed 0,
+# corrected spawn): ``paper`` 26%, ``calibrated`` 62%.
+#
+# ``calibrated`` was raised while chasing an apparent 3-5% yield that turned out to be
+# a spawn bug (trials were being placed off the ground plane), so the premise for
+# raising strength was wrong. ``paper`` is the default because it reproduces the
+# write-up's regime; ``calibrated`` is kept as an explicit stress profile.
+# The active profile is recorded in the run manifest -- quote it with results.
 PERTURBATION_PRESETS: dict[str, dict[str, float]] = {
     "paper": {
         "push_min": 1.5, "push_max": 3.5,
@@ -1093,9 +1095,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--oracle-lead-steps", type=int, default=15, help="Oracle trigger lead (15 = 300 ms at 50 Hz)")
 
     # Perturbation magnitudes come from --preset; override individually to deviate.
-    p.add_argument("--preset", choices=tuple(PERTURBATION_PRESETS), default="calibrated",
-                   help="Perturbation strength profile. 'paper' is the range in the write-up; "
-                        "'calibrated' (default) raises it to actually induce falls on the G1.")
+    p.add_argument("--preset", choices=tuple(PERTURBATION_PRESETS), default="paper",
+                   help="Perturbation strength profile. 'paper' (default) is the range in the "
+                        "write-up and yields ~26%% falls at 64 envs; 'calibrated' is a stronger "
+                        "stress profile (~62%%) for robustness sweeps.")
     p.add_argument("--push-min", type=float, default=None)
     p.add_argument("--push-max", type=float, default=None)
     p.add_argument("--slip-min", type=float, default=None)
