@@ -51,7 +51,7 @@ def load_trials(run_dir: Path) -> pd.DataFrame:
     df = pd.concat(frames, ignore_index=True)
     # Coerce numerics; some columns are empty for non-applicable mechanisms.
     for col in df.columns:
-        if col in {"baseline", "mechanisms", "primary", "freeze_mode", "freeze_dofs"}:
+        if col in {"baseline", "mechanisms", "primary", "freeze_mode", "freeze_dofs", "worst_hit_part"}:
             continue
         df[col] = pd.to_numeric(df[col], errors="coerce")
     df["illegal_pct"] = 100.0 * df["illegal_contact"].fillna(0.0)

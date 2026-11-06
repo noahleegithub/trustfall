@@ -10,6 +10,10 @@ them:
   body (the wrench transmitted through the joint).
 * ``max_contact_force`` -- peak per-link ground contact force (robot link vs. a
   non-robot body), adjacent-link self contacts excluded.
+* ``peak_force_{head,torso,hand}`` / ``cum_impulse_*`` -- per-part severity, attributed
+  by GEOM (the G1 head capsule is welded to ``torso_link``, so it is invisible to body
+  masks). These count ground / non-robot contacts only: a hand striking the head during
+  a fall is not included.
 * ``max_impulse`` / ``cumulative_impulse`` -- max per-physics-step and summed ground
   reaction impulse over the evaluated window.
 * ``illegal_contact`` -- whether a protected link (head / hands) contacted the ground
@@ -125,6 +129,13 @@ class ImpactMonitor:
         # torso strikes. Geom ids arrive with every contact, so classify per contact.
         self.PARTS: tuple[str, ...] = ("head", "torso", "hand")
         geom_names = list(getattr(simulator, "geom_names", []) or [])
+        ngeom_model = int(simulator.root_model.ngeom)
+        if len(geom_names) != ngeom_model:
+            raise RuntimeError(
+                f"simulator.geom_names has {len(geom_names)} entries but the model has "
+                f"{ngeom_model} geoms; per-part impact attribution would report zeros "
+                "for every part instead of failing. Refusing to build the monitor."
+            )
         body_of_geom = np.asarray(simulator.root_model.geom_bodyid, dtype=np.int64)
         body_name_by_id = {int(b): n for b, n in zip(list(simulator.body_ids), lower_names)}
         self.geom_part = torch.full((max(len(geom_names), 1),), -1, dtype=torch.long, device=self.device)
@@ -137,6 +148,11 @@ class ImpactMonitor:
                 self.geom_part[g] = 1
             elif "wrist" in ln or "hand" in ln or "wrist" in bn or "hand" in bn:
                 self.geom_part[g] = 2
+        if int((self.geom_part >= 0).sum()) == 0:
+            raise RuntimeError(
+                "No geom matched any impact part (head/torso/hand); per-part severity "
+                "would be identically zero. Refusing to build the monitor."
+            )
 
         # Raw body ids (0 == world).  ``body_parentid`` is static.
         parent = np.asarray(simulator.root_model.body_parentid, dtype=np.int64)
@@ -175,6 +191,8 @@ class ImpactMonitor:
             **{f"imp_{p}": torch.zeros(k, n, device=self.device) for p in ("head", "torso", "hand")},
         }
         self._step = {key: torch.zeros(n, device=self.device) for key in self._ring}
+        # Reused scratch for per-part force accumulation (avoids alloc + sync per substep).
+        self._part_acc = torch.zeros(n, 3, device=self.device)
         self.first_contact_step = torch.full((n,), -1, dtype=torch.long, device=self.device)
 
         # Hook registration.  FRAME_BEGIN / FRAME_END bracket one control step; POST_STEP
@@ -304,28 +322,37 @@ class ImpactMonitor:
             nonfoot = external & ~self.foot_mask[robot_body]
             nonfoot_contact = _scatter_any(nonfoot, worldid, n)
 
-            # Illegal: protected link vs ground or a non-adjacent robot link.
-            protected = self.protected_mask[body1] | self.protected_mask[body2]
-            adjacent = (self.parent[body1] == body2) | (self.parent[body2] == body1)
-            illegal = valid & protected & (external | (robot_self & ~adjacent))
-            illegal_contact = _scatter_any(illegal, worldid, n)
-
-            # Severe-but-not-illegal: torso striking the ground. Reported separately
-            # because on a headless humanoid it fires on essentially every fall.
-            severe = valid & external & (self.severe_mask[body1] | self.severe_mask[body2])
-            severe_contact = _scatter_any(severe, worldid, n)
-
-            # ---- per-part impact severity (head / torso / hand), attributed by geom.
-            # Use the vector sum of the contacts on each part, so two contacts on the
-            # head in the same substep do not each get counted as the peak.
+            # ---- part attribution (head / torso / hand) by GEOM. Computed before the
+            # boolean flags so they agree with the severity columns: on the G1 the head
+            # is a capsule welded to torso_link, which no body mask can represent.
             g1 = geom1_raw.to(device=self.device, dtype=torch.long).clamp(0, self.geom_part.shape[0] - 1)
             g2 = geom2_raw.to(device=self.device, dtype=torch.long).clamp(0, self.geom_part.shape[0] - 1)
             part_of_contact = torch.where(robot1, self.geom_part[g1], self.geom_part[g2])
+            head_part = self.PARTS.index("head")
+            torso_part = self.PARTS.index("torso")
+            head_contact = external & (part_of_contact == head_part)
+
+            # Illegal: protected link vs ground or a non-adjacent robot link -- plus any
+            # head-capsule ground strike, which the body mask cannot see.
+            protected = self.protected_mask[body1] | self.protected_mask[body2]
+            adjacent = (self.parent[body1] == body2) | (self.parent[body2] == body1)
+            illegal = valid & ((protected & (external | (robot_self & ~adjacent))) | head_contact)
+            illegal_contact = _scatter_any(illegal, worldid, n)
+
+            # Torso ground contact, classified by geom so head strikes are NOT counted
+            # as torso strikes (they share torso_link's body).
+            severe = external & (part_of_contact == torso_part)
+            severe_contact = _scatter_any(severe, worldid, n)
+
+            # ---- per-part impact severity. Vector-sum each part's contacts per substep
+            # so simultaneous contacts are not individually counted as the peak, then
+            # track the maximum force and the accumulated impulse. The scratch buffer is
+            # reused and zeroed in place: no per-substep allocation and no device sync.
+            acc = self._part_acc
             for pid, pname in enumerate(self.PARTS):
                 selected = external & (part_of_contact == pid)
-                acc = torch.zeros(n, 3, device=self.device)
-                if bool(selected.any()):
-                    acc.index_add_(0, worldid[selected], f_robot[selected])
+                acc.zero_()
+                acc.index_add_(0, worldid[selected], f_robot[selected])
                 magnitude = torch.linalg.vector_norm(acc, dim=-1)
                 self._step[f"force_{pname}"] = torch.maximum(self._step[f"force_{pname}"], magnitude)
                 self._step[f"imp_{pname}"] = self._step[f"imp_{pname}"] + magnitude * self.dt
@@ -413,8 +440,8 @@ class ImpactMonitor:
         cumulative = impulse.sum(dim=1)
         illegal = gather("illegal").max(dim=1).values > 0.5
         torso = gather("severe").max(dim=1).values > 0.5
-        peak_force = {p: gather(f"force_{p}").max(dim=1).values for p in ("head", "torso", "hand")}
-        cum_impulse = {p: gather(f"imp_{p}").sum(dim=1) for p in ("head", "torso", "hand")}
+        peak_force = {p: gather(f"force_{p}").max(dim=1).values for p in self.PARTS}
+        cum_impulse = {p: gather(f"imp_{p}").sum(dim=1) for p in self.PARTS}
         limits = gather("limit_violations").max(dim=1).values
 
         return ImpactTrialMetrics(

@@ -293,6 +293,13 @@ class FallBenchmark:
                 f"Available bodies: {', '.join(str(n) for n in self.sim.body_names)}"
             )
         logger.info(f"Protected bodies for illegal_contact ({n_protected}): {', '.join(patterns)}")
+        n_head = int((self.monitor.geom_part == self.monitor.PARTS.index("head")).sum())
+        if n_head == 0:
+            raise RuntimeError(
+                "No geom classified as 'head'; SafeFall head-impact severity would be "
+                "identically zero. Add the head capsule name to the part patterns."
+            )
+        logger.info(f"Part geoms: head={n_head}")
 
     def _install_freeze_override(self) -> None:
         self.freeze_mode = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
@@ -936,6 +943,17 @@ class FallBenchmark:
         csv_path = self.output_dir / f"trials_shard_{args.shard}.csv"
         jsonl_path = self.output_dir / f"scenarios_shard_{args.shard}.jsonl"
         write_header = not csv_path.exists()
+        if not write_header:
+            # Appending rows with a different column set silently corrupts the file
+            # (report.py then either raises on field counts or misaligns columns).
+            with csv_path.open(newline="") as fh:
+                existing = next(csv.reader(fh), [])
+            if existing != self._csv_fields():
+                raise RuntimeError(
+                    f"{csv_path} was written with a different schema "
+                    f"({len(existing)} columns vs {len(self._csv_fields())}); "
+                    "use a fresh output directory rather than appending."
+                )
         with csv_path.open("a", newline="") as f_csv, jsonl_path.open("a") as f_json:
             writer = csv.DictWriter(f_csv, fieldnames=self._csv_fields())
             if write_header:

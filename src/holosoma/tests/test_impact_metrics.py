@@ -45,7 +45,7 @@ class _FakeBackend:
         return self.qfrc_constraint
 
 
-def _make_monitor(num_envs: int = 2, nbody: int = 4, nv: int = 7):
+def _make_monitor(num_envs: int = 2, nbody: int = 4, nv: int = 7, protected_patterns=None):
     # body 0 world, 1 torso, 2 head, 3 foot.  Robot dof address 6 -> joint 0 -> body 1.
     # geoms: 0 = ground (world), 1 = torso capsule, 2 = HEAD capsule (welded to the
     # torso body, exactly like the G1's head_collision), 3 = foot.
@@ -55,6 +55,7 @@ def _make_monitor(num_envs: int = 2, nbody: int = 4, nv: int = 7):
         dof_jntid=np.zeros(nv, dtype=np.int32),
         jnt_bodyid=np.array([1], dtype=np.int32),
         geom_bodyid=np.array([0, 1, 1, 3], dtype=np.int32),
+        ngeom=4,
     )
     backend = _FakeBackend(num_envs, nbody, nv)
     sim = SimpleNamespace(
@@ -77,7 +78,10 @@ def _make_monitor(num_envs: int = 2, nbody: int = 4, nv: int = 7):
         hard_dof_pos_limits=torch.tensor([[-1.0, 1.0]]),
         torque_limits=torch.tensor([100.0]),
     )
-    monitor = ImpactMonitor(env, sim, window_steps=8)
+    kwargs = {}
+    if protected_patterns is not None:
+        kwargs["protected_patterns"] = protected_patterns
+    monitor = ImpactMonitor(env, sim, window_steps=8, **kwargs)
     return monitor, backend, sim
 
 
@@ -131,6 +135,21 @@ def test_per_part_severity_uses_geoms_not_bodies():
     # impulse = force * sim_dt (0.005 s)
     assert abs(res.cum_impulse_torso[0].item() - 0.5) < 1e-5
     assert abs(res.cum_impulse_head[1].item() - 1.25) < 1e-5
+
+
+def test_head_geom_strike_is_illegal_even_without_a_head_body():
+    """Regression: the head is a geom on torso_link, so a body-name mask cannot see it.
+    A head-capsule ground strike must still register as an illegal contact."""
+    # Build a monitor whose protected patterns match NO body at all.
+    monitor, _backend, sim = _make_monitor(protected_patterns=("nothing_matches",))
+    _step(monitor, sim, torque=[1.0, 1.0], reaction=[1.0, 1.0], contact=[10.0, 10.0])
+    res = monitor.results(torch.tensor([0, 1]), torch.tensor([1, 1]), torch.tensor([1, 1]))
+    # env 1 hit the head capsule; the body mask cannot express that, the geom can.
+    assert res.illegal_contact.tolist() == [False, True]
+    assert res.peak_force_head.tolist() == [0.0, 10.0]
+    assert res.peak_force_torso.tolist() == [10.0, 0.0]
+    # torso flag must not be set by the head strike
+    assert res.torso_contact.tolist() == [True, False]
 
 
 def test_torso_contact_is_not_illegal():

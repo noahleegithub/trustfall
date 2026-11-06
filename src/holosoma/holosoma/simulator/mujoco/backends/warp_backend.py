@@ -548,7 +548,8 @@ class WarpBackend(IMujocoBackend):
 
         The kernel writes a ``spatial_vector`` per contact; ``contact_force_fn`` fills
         the linear (force) part first, then rotates it into the world frame when
-        ``to_world_frame=True``.  Invalid/padded ids are left at zero.
+        ``to_world_frame=True``.  Padded slots (``valid == False``) carry clamped,
+        meaningless ids and must be masked out by the caller; their force is zero.
         """
         if self._naconmax == 0:
             empty = torch.zeros(0, device=self.device)
