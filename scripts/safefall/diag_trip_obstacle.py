@@ -123,7 +123,10 @@ def main() -> None:
         print(f"{'trial':>5} {'height':>7} {'dir':>16} {'dist':>6} {'pose xyz':>22} {'yaw':>7} {'top z':>7}")
         for i in trip:
             s = scenarios[i]
-            yaw = 2.0 * np.arctan2(quat[i, 2], quat[i, 3])
+            # readback() returns body_quat in wxyz (the backend converts xyzw -> wxyz on
+            # write), so the yaw about z is 2*atan2(qz, qw) = 2*atan2(quat[3], quat[0]).
+            # Using (quat[2], quat[3]) reads (y, z) and yields pi for a pure yaw.
+            yaw = 2.0 * np.arctan2(quat[i, 3], quat[i, 0])
             print(
                 f"{s.trial_id:5d} {s.trip_height:7.3f} "
                 f"({s.trip_dir_x:6.3f},{s.trip_dir_y:6.3f}) {s.trip_distance:6.3f} "
