@@ -49,6 +49,7 @@ from holosoma.config_types.termination import TerminationManagerCfg
 from holosoma.config_types.terrain import ObstacleCfg, with_obstacle
 from holosoma.config_values.logger import disabled as disabled_logger
 from holosoma.config_values.sensor import CAMERA_REGISTRY
+from holosoma.config_values.simulator import mujoco as mujoco_preset
 from holosoma.config_values.simulator import mjwarp as mjwarp_preset
 from holosoma.simulator.mujoco.impact_metrics import ImpactMonitor
 from holosoma.utils.eval_utils import (
@@ -202,15 +203,25 @@ class FallBenchmark:
             "sensor": {},
             "plugin": {},
         }
-        # Switch the backend to mjwarp but keep the checkpoint's physics/control rates.
-        sim_preset = dataclasses.replace(
-            mjwarp_preset,
-            config=dataclasses.replace(
-                mjwarp_preset.config,
-                sim=base.simulator.config.sim,
-                mujoco_warp=MujocoWarpConfig(nconmax_per_env=self.args.nconmax_per_env),
-            ),
-        )
+        # Switch the backend but keep the checkpoint's physics/control rates.
+        # The batch path uses mjwarp (GPU). Single-env rendering defaults to the classic
+        # backend: mjwarp asserts device-side at num_envs=1 (the failure surfaces in
+        # get_geom_friction), and one env gains nothing from GPU batching anyway.
+        use_classic = render and self.args.render_backend == "classic"
+        if use_classic:
+            sim_preset = dataclasses.replace(
+                mujoco_preset,
+                config=dataclasses.replace(mujoco_preset.config, sim=base.simulator.config.sim),
+            )
+        else:
+            sim_preset = dataclasses.replace(
+                mjwarp_preset,
+                config=dataclasses.replace(
+                    mjwarp_preset.config,
+                    sim=base.simulator.config.sim,
+                    mujoco_warp=MujocoWarpConfig(nconmax_per_env=self.args.nconmax_per_env),
+                ),
+            )
         cfg = dataclasses.replace(base, simulator=sim_preset, logger=disabled_logger, **overrides)
         # No termination: the benchmark needs the full fall and post-impact window.
         # No domain randomization: evaluation scenarios vary the fall, not the robot
@@ -1278,6 +1289,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--render-trial-id", type=int, default=-1, help="Render one trial instead of running the benchmark")
     p.add_argument("--render-baseline", choices=("nominal", "default", "damping"), default="nominal")
     p.add_argument("--render-camera", default="g1-chase", help="CAMERA_REGISTRY preset for the render camera")
+    p.add_argument(
+        "--render-backend",
+        choices=("classic", "mjwarp"),
+        default="classic",
+        help="Backend for single-env rendering. mjwarp asserts device-side at num_envs=1.",
+    )
     p.add_argument("--render-dir", default=None, help="Video output dir (default: <output-dir>/videos)")
     p.add_argument("--render-playback-rate", type=float, default=0.25)
 

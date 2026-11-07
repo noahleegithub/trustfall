@@ -122,11 +122,39 @@ def plot_overall(summary: pd.DataFrame, out_dir: Path) -> list[Path]:
         means = data[f"{col}_mean"].to_numpy()
         stds = data[f"{col}_std"].fillna(0).to_numpy()
         names = data["baseline"].astype(str).tolist()
-        ax.bar(names, means, yerr=stds, capsize=4, color=[COLORS.get(n, "#777") for n in names])
+        # Bars are drawn on a linear axis from zero. On a log axis every bar starts at the
+        # axis floor, so bar length stops being proportional to the value and all three
+        # arms look identical -- use a point plot when a log scale is genuinely needed.
+        if log and np.nanmax(means) > 0:
+            xpos = np.arange(len(names))
+            ax.errorbar(
+                xpos,
+                means,
+                yerr=stds,
+                fmt="o",
+                capsize=5,
+                ms=7,
+                lw=1.2,
+                color="#333",
+                ecolor="#888",
+            )
+            for xi, yi, ni in zip(xpos, means, names):
+                ax.annotate(
+                    f"{yi:.3g}",
+                    (xi, yi),
+                    textcoords="offset points",
+                    xytext=(9, 0),
+                    fontsize=8,
+                    color=COLORS.get(ni, "#555"),
+                )
+            ax.set_xticks(xpos)
+            ax.set_xticklabels(names)
+            ax.set_yscale("log")
+        else:
+            ax.bar(names, means, yerr=stds, capsize=4, color=[COLORS.get(n, "#777") for n in names])
+            ax.set_ylim(bottom=0)
         ax.set_ylabel(label)
         ax.set_title(label + " across falls")
-        if log and np.nanmax(means) > 0:
-            ax.set_yscale("log")
         ax.grid(axis="y", alpha=0.25)
         path = out_dir / f"metric_{col}.png"
         fig.savefig(path, dpi=170)
@@ -149,15 +177,33 @@ def plot_by_mechanism(summary: pd.DataFrame, out_dir: Path) -> list[Path]:
         for j, baseline in enumerate(BASELINES):
             if baseline not in piv.columns:
                 continue
-            ax.bar(
-                x + (j - (len(BASELINES) - 1) / 2) * width, piv[baseline], width, label=baseline, color=COLORS[baseline]
-            )
+            # See plot_overall: bars on a log axis misrepresent the values, so log-scaled
+            # metrics are drawn as point estimates instead.
+            if log:
+                ax.plot(
+                    x + (j - (len(BASELINES) - 1) / 2) * width,
+                    piv[baseline],
+                    "o",
+                    ms=7,
+                    label=baseline,
+                    color=COLORS[baseline],
+                )
+            else:
+                ax.bar(
+                    x + (j - (len(BASELINES) - 1) / 2) * width,
+                    piv[baseline],
+                    width,
+                    label=baseline,
+                    color=COLORS[baseline],
+                )
         ax.set_xticks(x)
         ax.set_xticklabels(piv.index)
         ax.set_ylabel(label)
         ax.set_title(f"{label} by primary fall mechanism")
         if log:
             ax.set_yscale("log")
+        else:
+            ax.set_ylim(bottom=0)
         ax.legend(frameon=False)
         ax.grid(axis="y", alpha=0.25)
         path = out_dir / f"mechanism_{col}.png"
