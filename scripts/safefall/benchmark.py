@@ -951,14 +951,11 @@ class FallBenchmark:
             raise RuntimeError("--render-trial-id requires --num-envs 1")
         scenario = self.make_scenario(args.render_trial_id)
         logger.info(f"Render trial {scenario.trial_id}: {scenario.mechanisms} {args.render_baseline}")
-        # Log the spawn before the expensive pre-fall pass: a classic-backend render has been seen
-        # to abort inside run_prefall, and the spawn is what decides whether a static world camera
-        # frames the robot at all. The reset here is throwaway (run_prefall resets again).
-        try:
-            self._reset(torch.tensor([scenario.command], device=self.device), [scenario.trial_id])
-            logger.info(f"RENDER FRAMING spawn={self.sim.robot_root_states[0, :3].tolist()}")
-        except Exception as exc:  # diagnostics must never break rendering
-            logger.warning(f"RENDER FRAMING unavailable: {exc}")
+        # NOTE: do not probe the spawn with a throwaway _reset here -- it consumes the trial's
+        # RNG draws, so run_prefall starts from a different state and the trial stops falling
+        # (observed: push trial 8 recovered instead of falling). The spawn is the terrain tile
+        # centre ((i+0.5)*env_length), measured once at (2.003, 2.002, 0.782) for this 4 m tile
+        # and pinned into the safefall-overview camera preset.
         pre = self.run_prefall([scenario], nominal_metrics=False)
         if not bool(pre.valid[0]):
             raise RuntimeError(f"Trial {scenario.trial_id} did not fall; nothing to render.")

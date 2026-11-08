@@ -58,3 +58,23 @@ CAMERA_REGISTRY.add("g1-waist-front", waist_front_camera)
 CAMERA_REGISTRY.add("g1-waist-back", waist_back_camera)
 # Free-floating angled isometric overview camera looking at the scene center (640x480).
 CAMERA_REGISTRY.add("overview", overview_camera)
+
+# Same isometric geometry as ``overview``, anchored on the terrain tile centre instead of the
+# world origin. The locomotion terrain term places every robot at its tile centre,
+# ``((i + 0.5) * env_length, (j + 0.5) * env_width)``, which for the benchmark's 4 m tile is
+# (2, 2) -- measured spawn (2.003, 2.002, 0.782). An origin-framed camera therefore shows empty
+# ground with the robot off at the frame edge. Translating camera and target by the same vector
+# leaves the eye->target direction unchanged, so the existing isometric quaternion still applies.
+_TILE_CENTER_XY = (2.0, 2.0)
+safefall_overview_camera = CameraSensorConfig(
+    mount=SensorMountConfig(
+        target_kind="world",
+        position=[_TILE_CENTER_XY[0] + 2.5, _TILE_CENTER_XY[1] - 2.5, 2.5],
+        orientation=_ISO_LOOK_AT_ORIGIN_WXYZ,
+    ),
+    width=640,
+    height=480,
+    vertical_fov=60.0,
+    data_types=["rgb"],
+)
+CAMERA_REGISTRY.add("safefall-overview", safefall_overview_camera)
