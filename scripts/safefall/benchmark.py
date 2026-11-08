@@ -967,6 +967,14 @@ class FallBenchmark:
 
         obs = self._reset(torch.tensor([scenario.command], device=self.device), [scenario.trial_id])
         self.monitor.reset()
+        # Camera framing diagnostics: a world-mount camera sits at its compiled spec pose, while the
+        # robot spawns at the terrain env origin. If those differ, an overview clip frames empty ground.
+        try:
+            origins = self.env.scene.env_origins
+            root = self.sim.robot_root_states[0, :3]
+            logger.info(f"RENDER FRAMING env_origin={origins[0].tolist()} robot_root={root.tolist()}")
+        except Exception as exc:  # diagnostics must never break rendering
+            logger.warning(f"RENDER FRAMING unavailable: {exc}")
 
         out_dir = Path(args.render_dir).expanduser() if args.render_dir else (self.output_dir / "videos")
         out_dir.mkdir(parents=True, exist_ok=True)

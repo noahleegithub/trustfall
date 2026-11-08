@@ -90,26 +90,6 @@ class ClassicBackend(IMujocoBackend):
         """
         return self.data
 
-    def offset_world_cameras(self, cam_ids: list[int], env_origins: torch.Tensor) -> None:
-        """Shift world-mount cameras onto the environment origin (classic is single-env).
-
-        A ``target_kind="world"`` camera is a worldbody child, so it does not inherit the
-        per-env body offset the way a robot-mounted camera does. Without this the camera
-        stays at the spec pose while the robot stands at the terrain origin, which frames
-        empty ground whenever that origin is not (0, 0, 0) -- observed as a legible-looking
-        but empty overview clip. The WarpBackend implementation skips ``num_envs == 1``
-        because there the per-env offset is zero, but the *terrain* origin can still be
-        non-zero, so single-env rendering needs the shift too.
-        """
-        if not cam_ids:
-            return
-        origin = env_origins[0].detach().to("cpu").numpy().astype(self.model.cam_pos.dtype, copy=False)
-        logger.info(f"Offsetting {len(cam_ids)} world camera(s) by env origin {origin.tolist()}")
-        for cam_id in cam_ids:
-            self.model.cam_pos[cam_id] = self.model.cam_pos[cam_id] + origin
-        # cam_xpos is derived; recompute so the first render sees the shifted pose.
-        mujoco.mj_forward(self.model, self.data)
-
     def create_renderers(self, cameras: list[CameraRuntime]) -> None:
         # Per-camera renderer (classic only), keyed by camera NAME:
         # mujoco.Renderer is RGB XOR depth, so depth cameras get a SEPARATE depth-enabled renderer
