@@ -951,6 +951,14 @@ class FallBenchmark:
             raise RuntimeError("--render-trial-id requires --num-envs 1")
         scenario = self.make_scenario(args.render_trial_id)
         logger.info(f"Render trial {scenario.trial_id}: {scenario.mechanisms} {args.render_baseline}")
+        # Log the spawn before the expensive pre-fall pass: a classic-backend render has been seen
+        # to abort inside run_prefall, and the spawn is what decides whether a static world camera
+        # frames the robot at all. The reset here is throwaway (run_prefall resets again).
+        try:
+            self._reset(torch.tensor([scenario.command], device=self.device), [scenario.trial_id])
+            logger.info(f"RENDER FRAMING spawn={self.sim.robot_root_states[0, :3].tolist()}")
+        except Exception as exc:  # diagnostics must never break rendering
+            logger.warning(f"RENDER FRAMING unavailable: {exc}")
         pre = self.run_prefall([scenario], nominal_metrics=False)
         if not bool(pre.valid[0]):
             raise RuntimeError(f"Trial {scenario.trial_id} did not fall; nothing to render.")
@@ -969,23 +977,7 @@ class FallBenchmark:
         self.monitor.reset()
         # Camera framing diagnostics: a world-mount camera sits at its compiled spec pose, while the
         # robot spawns at the terrain env origin. If those differ, an overview clip frames empty ground.
-        try:
-            root = self.sim.robot_root_states[0, :3].tolist()
-            origin = None
-            for owner in (self.sim, getattr(self.sim, "backend", None), self.env):
-                for attr in ("_env_origins", "env_origins"):
-                    val = getattr(owner, attr, None)
-                    if val is not None and hasattr(val, "__getitem__"):
-                        try:
-                            origin = val[0][:3].tolist()
-                            break
-                        except Exception:
-                            continue
-                if origin is not None:
-                    break
-            logger.info(f"RENDER FRAMING robot_root={root} env_origin={origin}")
-        except Exception as exc:  # diagnostics must never break rendering
-            logger.warning(f"RENDER FRAMING unavailable: {exc}")
+
 
         out_dir = Path(args.render_dir).expanduser() if args.render_dir else (self.output_dir / "videos")
         out_dir.mkdir(parents=True, exist_ok=True)
