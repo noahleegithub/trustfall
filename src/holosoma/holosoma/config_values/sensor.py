@@ -66,15 +66,23 @@ CAMERA_REGISTRY.add("overview", overview_camera)
 # ground with the robot off at the frame edge. Translating camera and target by the same vector
 # leaves the eye->target direction unchanged, so the existing isometric quaternion still applies.
 _TILE_CENTER_XY = (2.0, 2.0)
+# Offset 2.0 m (not 2.5): a scalar multiple of (2.5, -2.5, 2.5), so the isometric quaternion
+# above still describes the eye->target direction while the robot fills more of the frame.
+# 960x720 at a 50 deg vertical FOV keeps the whole 4 m tile in shot: a push fall travels ~1.5 m.
+_SAFEFALL_CAM_OFFSET = (2.0, -2.0, 2.0)
 safefall_overview_camera = CameraSensorConfig(
     mount=SensorMountConfig(
         target_kind="world",
-        position=[_TILE_CENTER_XY[0] + 2.5, _TILE_CENTER_XY[1] - 2.5, 2.5],
+        position=[
+            _TILE_CENTER_XY[0] + _SAFEFALL_CAM_OFFSET[0],
+            _TILE_CENTER_XY[1] + _SAFEFALL_CAM_OFFSET[1],
+            _SAFEFALL_CAM_OFFSET[2],
+        ],
         orientation=_ISO_LOOK_AT_ORIGIN_WXYZ,
     ),
-    width=640,
-    height=480,
-    vertical_fov=60.0,
+    width=960,
+    height=720,
+    vertical_fov=50.0,
     data_types=["rgb"],
 )
 CAMERA_REGISTRY.add("safefall-overview", safefall_overview_camera)
