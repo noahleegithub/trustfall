@@ -970,9 +970,20 @@ class FallBenchmark:
         # Camera framing diagnostics: a world-mount camera sits at its compiled spec pose, while the
         # robot spawns at the terrain env origin. If those differ, an overview clip frames empty ground.
         try:
-            origins = self.env.scene.env_origins
-            root = self.sim.robot_root_states[0, :3]
-            logger.info(f"RENDER FRAMING env_origin={origins[0].tolist()} robot_root={root.tolist()}")
+            root = self.sim.robot_root_states[0, :3].tolist()
+            origin = None
+            for owner in (self.sim, getattr(self.sim, "backend", None), self.env):
+                for attr in ("_env_origins", "env_origins"):
+                    val = getattr(owner, attr, None)
+                    if val is not None and hasattr(val, "__getitem__"):
+                        try:
+                            origin = val[0][:3].tolist()
+                            break
+                        except Exception:
+                            continue
+                if origin is not None:
+                    break
+            logger.info(f"RENDER FRAMING robot_root={root} env_origin={origin}")
         except Exception as exc:  # diagnostics must never break rendering
             logger.warning(f"RENDER FRAMING unavailable: {exc}")
 
