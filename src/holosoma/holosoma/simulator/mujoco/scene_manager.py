@@ -640,6 +640,14 @@ class MujocoSceneManager:
                 mode=mujoco.mjtCamLight.mjCAMLIGHT_FIXED,
             )
 
+        # The offscreen framebuffer defaults to 640x480, and mujoco.Renderer raises
+        # "Image width W > framebuffer width 640" for anything larger. Size it to the largest
+        # requested camera so a high-resolution camera is a config change, not a failure.
+        if cameras:
+            vis_global = self.world_spec.visual.global_
+            vis_global.offwidth = max(int(vis_global.offwidth), max(c.width for c in cameras.values()))
+            vis_global.offheight = max(int(vis_global.offheight), max(c.height for c in cameras.values()))
+
     def _resolve_mount_body_name(self, target_kind: str, target: str, robot_prefix: str) -> str:
         """Resolve a sensor mount (kind, target) to a composed-spec body name.
 
